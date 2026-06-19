@@ -83,6 +83,9 @@ CSE327_Project/
 ```
    Visit `http://localhost:3000`.
 
+#bash to create frontend so that nxt.js doesn't provide git : npx create-next-app@latest frontend --no-git
+#everytime in terminal to run the node js I  need to: $env:Path += ";C:\Program Files\nodejs\"
+
 ## Notes
 
 - Never commit `.env` files — only `.env.example` should be in the repo.
