@@ -21,7 +21,7 @@ export default function SignupPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("") // ADDED: Hook mapping local data validation error notifications
 
-  const handleSignup = async (e: React.FormEvent) => {
+  const handleSignup = async (e: React.SyntheticEvent<HTMLFormElement>) => {
   e.preventDefault()
   
   if (password !== confirm) {
