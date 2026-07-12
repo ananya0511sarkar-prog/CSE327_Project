@@ -20,7 +20,7 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("") 
 
-const handleLogin = async (e: React.FormEvent) => {
+const handleLogin = async (e: React.SyntheticEvent<HTMLFormElement>) => {
     e.preventDefault(); 
     setLoading(true);
     setError(""); 
@@ -40,6 +40,8 @@ const handleLogin = async (e: React.FormEvent) => {
       const data = await response.json();
 
       if (data.success) {
+        localStorage.setItem("token", data.token);   // ← ADD THIS LINE
+
         // 🚀 Extract the true role saved in Neon PostgreSQL
         const trueRole = data.user.role.toLowerCase();
         const expectedRole = role.toLowerCase();

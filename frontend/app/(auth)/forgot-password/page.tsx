@@ -21,7 +21,7 @@ export default function ForgotPasswordPage() {
   const [successMessage, setSuccessMessage] = useState("")
 
   // Handler for Step 1: Submitting Email to Backend
-  const handleVerifyEmail = async (e: React.FormEvent) => {
+  const handleVerifyEmail = async (e: React.SyntheticEvent<HTMLFormElement>) => {
     e.preventDefault()
     setLoading(true)
     setError("")
@@ -50,7 +50,7 @@ export default function ForgotPasswordPage() {
   }
 
   // Handler for Step 2: Submitting the New Password
-  const handlePasswordUpdate = async (e: React.FormEvent) => {
+  const handlePasswordUpdate = async (e: React.SyntheticEvent<HTMLFormElement>) => {
     e.preventDefault()
 
     if (newPassword !== confirmPassword) {
