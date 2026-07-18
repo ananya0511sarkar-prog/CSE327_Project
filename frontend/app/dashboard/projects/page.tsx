@@ -21,10 +21,16 @@ interface Project {
 }
 
 export default function ProjectsPage() {
-  // Manage Active State for the "View Specs" Modal Window
+  // State for showing the detailed project specs modal window
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
 
-  // Core Data Stack representing your platforms pipelines
+  // Form states for creating a new project track inline
+  const [isCreating, setIsCreating] = useState(false);
+  const [newTitle, setNewTitle] = useState('');
+  const [newDetails, setNewDetails] = useState('');
+  const [newEngine, setNewEngine] = useState<'ChatGPT-4o' | 'Gemini 1.5 Pro' | 'Claude 3.5 Sonnet'>('Claude 3.5 Sonnet');
+
+  // Core Data Stack representing your platform pipelines
   const [allProjects, setAllProjects] = useState<Project[]>([
     { 
       id: 1, 
@@ -74,6 +80,31 @@ export default function ProjectsPage() {
     }
   ]);
 
+  // Handler to provision a new project into our client stack
+  const handleProvisionProject = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newTitle.trim()) return;
+
+    const assignedId = allProjects.length + 1;
+    const provisionedTrack: Project = {
+      id: assignedId,
+      title: `Project ${assignedId}: ${newTitle.trim()}`,
+      status: "In Progress",
+      badgeColor: "text-amber-600 bg-amber-50 border-amber-200",
+      date: "Just Now",
+      details: newDetails.trim() || "No customized problem architecture instructions supplied yet.",
+      aiEngine: newEngine
+    };
+
+    setAllProjects(prev => [...prev, provisionedTrack]);
+    
+    // Reset structural tracking parameters back to default
+    setNewTitle('');
+    setNewDetails('');
+    setNewEngine('Claude 3.5 Sonnet');
+    setIsCreating(false);
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans relative">
       <div className="flex flex-1">
@@ -88,7 +119,9 @@ export default function ProjectsPage() {
             {/* User Account Capsule */}
             <div className="flex flex-col items-center text-center my-6 border-b border-slate-800 pb-6">
               <div className="w-20 h-20 bg-slate-700 rounded-full flex items-center justify-center text-slate-400 mb-3 overflow-hidden border-2 border-slate-600">
-                <svg className="w-12 h-12" fill="currentColor" viewBox="0 0 24 24"><path fillRule="evenodd" d="M18.685 19.097A9.723 9.723 0 0021.75 12c0-5.385-4.365-9.75-9.75-9.75S2.25 6.615 2.25 12c0 2.654 1.057 5.063 2.769 6.843.048.05.084.111.104.177A11.966 11.966 0 0012 21c2.569 0 4.978-.813 6.953-2.195a.23.23 0 01.1-.114zM12 6.75a3.25 3.25 0 100 6.5 3.25 3.25 0 000-6.5z" clipRule="evenodd" /></svg>
+                <svg className="w-12 h-12" fill="currentColor" viewBox="0 0 24 24">
+                  <path fillRule="evenodd" d="M18.685 19.097A9.723 9.723 0 0021.75 12c0-5.385-4.365-9.75-9.75-9.75S2.25 6.615 2.25 12c0 2.654 1.057 5.063 2.769 6.843.048.05.084.111.104.177A11.966 11.966 0 0012 21c2.569 0 4.978-.813 6.953-2.195a.23.23 0 01.1-.114zM12 6.75a3.25 3.25 0 100 6.5 3.25 3.25 0 000-6.5z" clipRule="evenodd" />
+                </svg>
               </div>
               <h3 className="text-white font-semibold text-base">John Doe</h3>
               <p className="text-xs text-slate-500 mt-0.5">Aspiring Software Engineer</p>
@@ -97,11 +130,15 @@ export default function ProjectsPage() {
             {/* Sidebar Navigation Paths */}
             <nav className="space-y-1">
               <Link href="/dashboard" className="flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-slate-800 hover:text-white text-slate-400 font-medium text-sm transition-colors">
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v4a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v4a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v4a2 2 0 01-2 2H6a2 2 0 01-2-2v-4zM14 16a2 2 0 012-2h2a2 2 0 012 2v4a2 2 0 01-2 2h-2a2 2 0 01-2-2v-4z" /></svg>
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v4a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v4a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v4a2 2 0 01-2 2H6a2 2 0 01-2-2v-4zM14 16a2 2 0 012-2h2a2 2 0 012 2v4a2 2 0 01-2 2h-2a2 2 0 01-2-2v-4z" />
+                </svg>
                 Dashboard
               </Link>
               <Link href="/dashboard/projects" className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-slate-800 text-white font-medium text-sm transition-colors">
-                <svg className="w-5 h-5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
+                <svg className="w-5 h-5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                </svg>
                 Projects
               </Link>
             </nav>
@@ -120,16 +157,83 @@ export default function ProjectsPage() {
               <p className="text-slate-500 text-sm mt-1">Deploy LLM-powered engine configurations or upgrade to live Human Specialist review.</p>
             </div>
             
-            {/* Quick Action Premium Hooks */}
+            {/* Quick Action Premium Hooks & New Project Trigger */}
             <div className="flex gap-2">
+              <button 
+                type="button"
+                onClick={() => setIsCreating(!isCreating)}
+                className="bg-blue-600 text-white hover:bg-blue-700 text-xs font-bold py-2.5 px-4 rounded-lg shadow-sm transition-colors flex items-center gap-1.5"
+              >
+                {isCreating ? '✕ Close Form' : '➕ Create New Project'}
+              </button>
               <button className="bg-white border border-slate-200 text-slate-800 hover:bg-slate-50 text-xs font-semibold py-2.5 px-4 rounded-lg shadow-sm transition-colors flex items-center gap-1.5">
                 <span className="w-2 h-2 rounded-full bg-blue-500"></span> Ask Expert (Paid)
               </button>
-              <button className="bg-blue-600 text-white hover:bg-blue-700 text-xs font-semibold py-2.5 px-4 rounded-lg shadow-sm transition-colors flex items-center gap-1.5">
-                📹 Book Video Mock
-              </button>
             </div>
           </header>
+
+          {/* DYNAMIC FORM DRAWER INLINE PANEL */}
+          {isCreating && (
+            <form onSubmit={handleProvisionProject} className="bg-gradient-to-br from-slate-900 to-slate-950 text-slate-200 border border-slate-800 rounded-xl p-6 shadow-md mb-8 animate-in fade-in slide-in-from-top-4 duration-200 space-y-4 max-w-2xl">
+              <div>
+                <h3 className="text-sm font-bold text-white uppercase tracking-wider mb-1">Configure New Workspace Track</h3>
+                <p className="text-xs text-slate-400">Initialize custom prompts and isolate context paths across independent LLM engines.</p>
+              </div>
+
+              <div className="space-y-3 text-sm">
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs font-medium text-slate-300">Project Track Name</label>
+                  <input 
+                    type="text" 
+                    required
+                    value={newTitle}
+                    onChange={(e) => setNewTitle(e.target.value)}
+                    placeholder="e.g., Dynamic Programming & Array Optimization" 
+                    className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:border-blue-500 text-xs sm:text-sm"
+                  />
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs font-medium text-slate-300">Default Evaluator Engine API</label>
+                  <select 
+                    value={newEngine}
+                    onChange={(e) => setNewEngine(e.target.value as any)}
+                    className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-blue-500 text-xs sm:text-sm"
+                  >
+                    <option value="Claude 3.5 Sonnet">Claude 3.5 Sonnet (Recommended)</option>
+                    <option value="ChatGPT-4o">ChatGPT-4o Engine</option>
+                    <option value="Gemini 1.5 Pro">Gemini 1.5 Pro</option>
+                  </select>
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs font-medium text-slate-300">Sandbox Structural Details (Optional)</label>
+                  <textarea 
+                    value={newDetails}
+                    onChange={(e) => setNewDetails(e.target.value)}
+                    placeholder="Provide notes on patterns or architectural specifications to focus evaluation workflows..."
+                    className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-slate-100 placeholder-slate-600 focus:outline-none focus:border-blue-500 text-xs sm:text-sm h-20 resize-none leading-relaxed"
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button 
+                  type="button" 
+                  onClick={() => setIsCreating(false)}
+                  className="px-4 py-2 text-xs font-semibold rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button 
+                  type="submit"
+                  className="px-4 py-2 text-xs font-bold rounded-md bg-emerald-600 hover:bg-emerald-700 text-white shadow transition-colors"
+                >
+                  Deploy Project Track
+                </button>
+              </div>
+            </form>
+          )}
 
           {/* PROJECT DEPLOYMENT GRID */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -176,6 +280,7 @@ export default function ProjectsPage() {
                 {/* INTERACTIVE ACTIONS HUB */}
                 <div className="flex gap-2 pt-2 border-t border-slate-100">
                   <button 
+                    type="button"
                     onClick={() => setSelectedProject(project)}
                     className="flex-1 py-2 text-center text-xs font-semibold rounded-md border border-slate-200 text-slate-700 hover:bg-slate-50 transition-colors"
                   >
@@ -183,7 +288,7 @@ export default function ProjectsPage() {
                   </button>
                   
                   <Link 
-                    href={`/dashboard/projects/${project.id}/workspace`}
+                    href={`/dashboard/projects/${project.id}/workspace?name=${encodeURIComponent(project.title)}&topic=${encodeURIComponent(project.details)}&engine=${encodeURIComponent(project.aiEngine || 'Gemini 1.5 Pro')}`}
                     className="flex-1 py-2 text-center text-xs font-semibold rounded-md bg-blue-600 hover:bg-blue-700 text-white shadow-sm transition-colors block"
                   >
                     {project.expertSession?.type === "Video Mock Interview" ? "Join Video Call" : "Open Workspace"}
@@ -215,6 +320,7 @@ export default function ProjectsPage() {
                 <h2 className="text-xl font-bold text-slate-900 mt-0.5">{selectedProject.title}</h2>
               </div>
               <button 
+                type="button"
                 onClick={() => setSelectedProject(null)}
                 className="text-slate-400 hover:text-slate-600 text-xl font-semibold px-2 rounded-lg hover:bg-slate-100"
               >
@@ -232,7 +338,7 @@ export default function ProjectsPage() {
                   <div className={`p-2 rounded border ${selectedProject.aiEngine === 'ChatGPT-4o' ? 'bg-emerald-50 border-emerald-300 text-emerald-800 font-bold' : 'bg-white text-slate-400 border-slate-200'}`}>
                     ChatGPT-4o
                   </div>
-                  <div className={`p-2 rounded border ${selectedProject.aiEngine === 'Gemini 1.5 Pro' ? 'bg-indigo-50 border-indigo-300 text-indigo-800 font-bold' : 'bg-white text-slate-400 border-slate-200'}`}>
+                  <div className={`p-2 rounded border ${selectedProject.aiEngine === 'Gemini 1. Pro' || selectedProject.aiEngine === 'Gemini 1.5 Pro' ? 'bg-indigo-50 border-indigo-300 text-indigo-800 font-bold' : 'bg-white text-slate-400 border-slate-200'}`}>
                     Gemini 1.5
                   </div>
                   <div className={`p-2 rounded border ${selectedProject.aiEngine === 'Claude 3.5 Sonnet' ? 'bg-amber-50 border-amber-300 text-amber-800 font-bold' : 'bg-white text-slate-400 border-slate-200'}`}>
@@ -253,7 +359,7 @@ export default function ProjectsPage() {
                 ) : (
                   <div className="flex justify-between items-center text-xs">
                     <span className="text-slate-500 italic">No human expert attached to this track yet.</span>
-                    <button className="text-blue-600 font-bold hover:underline">Add Premium Review</button>
+                    <button type="button" className="text-blue-600 font-bold hover:underline">Add Premium Review</button>
                   </div>
                 )}
               </div>
@@ -261,12 +367,13 @@ export default function ProjectsPage() {
 
             <div className="mt-6 flex justify-end gap-2">
               <button 
+                type="button"
                 onClick={() => setSelectedProject(null)}
                 className="px-4 py-2 text-xs font-semibold rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors"
               >
                 Dismiss Specs
               </button>
-              <button className="px-4 py-2 text-xs font-semibold rounded-md bg-blue-600 hover:bg-blue-700 text-white shadow transition-colors">
+              <button type="button" className="px-4 py-2 text-xs font-semibold rounded-md bg-blue-600 hover:bg-blue-700 text-white shadow transition-colors">
                 Save Adjustments
               </button>
             </div>
