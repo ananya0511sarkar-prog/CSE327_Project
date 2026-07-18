@@ -1,6 +1,19 @@
+"use client";
+
 import Link from 'next/link';
+import { useEffect } from "react";
 
 export default function DashboardPage() {
+   useEffect(() => {
+    const token = localStorage.getItem("token");
+
+    console.log("Token:", token);
+
+    if (token) {
+      const payload = JSON.parse(atob(token.split(".")[1]));
+      console.log("Payload:", payload);
+    }
+  }, []);
   // Mock data for previous projects
   const previousProjects = [
     {
