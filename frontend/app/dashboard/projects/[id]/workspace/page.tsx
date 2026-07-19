@@ -1,5 +1,44 @@
 "use client";
 
+/**
+ * ============================================================================
+ * CHANGE SUMMARY — read this before diffing line by line
+ * ============================================================================
+ * This file has gone through three rounds of changes on top of the original:
+ *
+ * ROUND 1 — per-difficulty questions (fixes Prev/Next mixing difficulties)
+ *   - questionsByDifficulty / indexByDifficulty replace the old single
+ *     `questions` array + `currentQuestionIndex`.
+ *   - localStorage keys for saved code now include difficulty.
+ *
+ * ROUND 2 — questions persist in the database (fixes "questions vanish on
+ * logout / refresh")
+ *   - generateLLMQuestion always sends engine: "Gemini" to the
+ *     generate-question endpoint specifically (HARDCODED — see note at that
+ *     line). Chat and Evaluate still use whichever engine is selected in the
+ *     top-right tabs (selectedAI) — this hardcoding only affects question
+ *     generation.
+ *   - A new effect (STEP 2) fetches GET /api/projects/{id}/questions on
+ *     mount and only generates fresh questions for difficulties that come
+ *     back empty.
+ *
+ * ROUND 3 — full evaluation history per question (this round)
+ *   - ChallengeQuestion now carries a real database `id` (not just its
+ *     display `number`), because evaluations are linked to a specific saved
+ *     question row, not just "Question #3 of Easy".
+ *   - handleCheckAnswer now sends question_id in the evaluate request so the
+ *     backend can save this attempt against the right question.
+ *   - A new `evaluationHistory` state + effect loads every past evaluation
+ *     for whichever question is currently active from
+ *     GET /api/questions/{id}/evaluations, and renders them under the hint.
+ *   - HARDCODED: fallback questions (generated when the backend/Gemini call
+ *     fails) get `id: -1` as a sentinel, since they were never saved to the
+ *     database and have no real row to attach evaluations to. The
+ *     evaluation-history effect checks for this and skips fetching when
+ *     id < 0.
+ * ============================================================================
+ */
+
 import { useState, use, useRef, useEffect } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
@@ -17,137 +56,313 @@ interface Message {
 }
 
 interface ChallengeQuestion {
-  number: number;
+  id: number;          // NEW (Round 3) — the real project_questions.id row from Neon.
+                        // HARDCODED sentinel: fallback (offline) questions get id: -1
+                        // since they were never saved, so evaluations can't attach to them.
+  number: number;       // display position within its difficulty (Q1, Q2, ... of Easy/Medium/Hard)
   title: string;
   description: string;
   hint: string;
   starterCode: string;
 }
 
+// NEW (Round 1) — named type so Easy/Medium/Hard isn't retyped as a union everywhere
+type Difficulty = 'Easy' | 'Medium' | 'Hard';
+
+// NEW (Round 3) — shape of one row coming back from GET /api/questions/{id}/evaluations
+interface EvaluationRecord {
+  id: number;
+  code_snapshot: string;
+  evaluation_text: string;
+  engine: string | null;
+  created_at: string;
+}
+
 export default function WorkspacePage({ params }: WorkspacePageProps) {
   const resolvedParams = use(params);
   const projectId = resolvedParams.id;
-  
+
   const searchParams = useSearchParams();
   const projectName = searchParams.get('name') || `Project Track #${projectId}`;
   const projectTopic = searchParams.get('topic') || "General Coding Track Parameters";
   const incomingEngine = searchParams.get('engine') || 'Claude';
 
-  const initialAISelection = incomingEngine.includes('Gemini') 
-    ? 'Gemini' 
-    : incomingEngine.includes('ChatGPT') 
-      ? 'ChatGPT' 
+  const initialAISelection = incomingEngine.includes('Gemini')
+    ? 'Gemini'
+    : incomingEngine.includes('ChatGPT')
+      ? 'ChatGPT'
       : 'Claude';
 
   // --- WORKFLOW STATES ---
-  const [difficulty, setDifficulty] = useState<'Easy' | 'Medium' | 'Hard'>('Medium');
-  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+  const [difficulty, setDifficulty] = useState<Difficulty>('Medium');
   const [showHint, setShowHint] = useState(false);
   const [isGeneratingQuestion, setIsGeneratingQuestion] = useState(false);
-  
-  // Start with an empty questions array so we can cleanly populate from the LLM
-  const [questions, setQuestions] = useState<ChallengeQuestion[]>([]);
 
+  // (Round 1) Each difficulty gets its OWN question list and OWN current index,
+  // keyed by difficulty, instead of one shared array/index for all three.
+  const [questionsByDifficulty, setQuestionsByDifficulty] = useState<Record<Difficulty, ChallengeQuestion[]>>({
+    Easy: [],
+    Medium: [],
+    Hard: []
+  });
+  const [indexByDifficulty, setIndexByDifficulty] = useState<Record<Difficulty, number>>({
+    Easy: 0,
+    Medium: 0,
+    Hard: 0
+  });
+
+  // Derived shortcuts into the per-difficulty maps for whichever difficulty is
+  // currently selected — the rest of the component can keep using `questions` /
+  // `currentQuestionIndex` / `activeQuestion` exactly like the original file did.
+  const questions = questionsByDifficulty[difficulty];
+  const currentQuestionIndex = indexByDifficulty[difficulty];
   const activeQuestion = questions[currentQuestionIndex] || null;
 
-  // --- STANDARD WORKSPACE STATES ---
+  // --- STANDARD WORKSPACE STATES (unchanged from original) ---
   const [selectedAI, setSelectedAI] = useState<'ChatGPT' | 'Gemini' | 'Claude'>(initialAISelection);
   const [activeTab, setActiveTab] = useState<'ai-chat' | 'expert-qa' | 'video-call'>('ai-chat');
   const [chatInput, setChatInput] = useState('');
   const [codeSnippet, setCodeSnippet] = useState('');
-  
+
   const [isSaving, setIsSaving] = useState(false);
-  const [isAiTyping, setIsAiTyping] = useState(false); 
+  const [isAiTyping, setIsAiTyping] = useState(false);
   const [isEvaluating, setIsEvaluating] = useState(false);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saved' | 'failed'>('idle');
   const [messages, setMessages] = useState<Message[]>([]);
 
-  // --- 1. DYNAMIC LLM QUESTION GENERATOR FUNCTION ---
-  const generateLLMQuestion = async (forcedDifficulty?: 'Easy' | 'Medium' | 'Hard') => {
-    setIsGeneratingQuestion(true);
+  // NEW (Round 3) — every past evaluation attempt for the CURRENTLY ACTIVE question.
+  // Reloaded every time activeQuestion changes (see the effect below).
+  const [evaluationHistory, setEvaluationHistory] = useState<EvaluationRecord[]>([]);
+  const [expandedEvals, setExpandedEvals] = useState<Set<number>>(new Set());
+
+const toggleEvalExpanded = (evalId: number) => {
+  setExpandedEvals(prev => {
+    const next = new Set(prev);
+    if (next.has(evalId)) {
+      next.delete(evalId);
+    } else {
+      next.add(evalId);
+    }
+    return next;
+  });
+};
+
+  // ==========================================================================
+  // STEP 1 — QUESTION GENERATOR
+  // Appends into questionsByDifficulty[targetDifficulty] (Round 1) and always
+  // asks the backend to grade/generate using Gemini specifically (Round 2).
+  // ==========================================================================
+  const generateLLMQuestion = async (forcedDifficulty?: Difficulty) => {
     const targetDifficulty = forcedDifficulty || difficulty;
-    
+    setIsGeneratingQuestion(true);
+
     try {
       const response = await fetch(`http://localhost:8000/api/projects/${projectId}/generate-question`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ 
-          difficulty: targetDifficulty, 
-          topic: projectTopic, 
+        body: JSON.stringify({
+          difficulty: targetDifficulty,
+          topic: projectTopic,
           project_name: projectName,
-          engine: selectedAI 
+          // HARDCODED (Round 2): question generation always uses free-tier Gemini,
+          // regardless of what selectedAI is set to in the top-right tabs. That
+          // selector still controls the CHAT and EVALUATE calls below — only the
+          // question generator itself is locked to Gemini.
+          engine: "Gemini"
         })
       });
       const data = await response.json();
-      
-      if (data.success && data.question) {
+
+      if (!data.success || !data.question) {
+        throw new Error(data.error || "Invalid response format from generator API");
+      }
+
+      // Append the new question into ONLY this difficulty's list.
+      // data.question_id comes from the backend's ProjectQuestionDB row it just
+      // created — this is the real DB id we need later for saving evaluations.
+      setQuestionsByDifficulty(prev => {
+        const existing = prev[targetDifficulty];
         const newQ: ChallengeQuestion = {
-          number: questions.length + 1,
+          id: data.question_id,   // NEW (Round 3)
+          number: existing.length + 1,
           title: data.question.title,
           description: data.question.description,
           hint: data.question.hint,
           starterCode: data.question.starterCode || `// Write your solution here...`
         };
-        setQuestions(prev => [...prev, newQ]);
-        setCurrentQuestionIndex(questions.length); // Push index forward to the brand new question
-      } else {
-        // Fallback placeholder if backend is missing properties
-        throw new Error(data.error || "Invalid response format from generator API");
-      }
+        return { ...prev, [targetDifficulty]: [...existing, newQ] };
+      });
+
+      // Move the pointer for THIS difficulty to the newly-added question.
+      // NOTE: reads questionsByDifficulty[targetDifficulty].length from the
+      // surrounding closure rather than from inside the state updater above.
+      // For a single generate call this is correct (existing.length before
+      // appending == the new item's index), but back-to-back rapid calls
+      // before a re-render settles could compute a stale value. Not an issue
+      // with current usage (one click == one call), just flagging it.
+      setIndexByDifficulty(prev => ({
+        ...prev,
+        [targetDifficulty]: questionsByDifficulty[targetDifficulty].length
+      }));
+
     } catch (e: any) {
       console.error("Error generating question:", e);
-      // Generate an emergency question to keep UI functional if backend completely fails
-      const fallbackQ: ChallengeQuestion = {
-        number: questions.length + 1,
-        title: `Dynamic Interview Probe: ${projectTopic}`,
-        description: `Please write an efficient implementation matching your project parameters for: ${projectName}. (Backend API Generation Failed)`,
-        hint: `Focus on clean algorithmic structural decomposition.`,
-        starterCode: `// API offline fallback code execution scope\nfunction solution() {\n  \n}`
-      };
-      setQuestions(prev => [...prev, fallbackQ]);
-      setCurrentQuestionIndex(questions.length);
+      // Fallback question so the UI doesn't dead-end if the backend/Gemini call fails.
+      // HARDCODED (Round 3): id: -1 marks this as "never saved to the database" —
+      // the evaluation-history effect below checks for this and skips fetching,
+      // since there's no real question_evaluations foreign key to attach to.
+      setQuestionsByDifficulty(prev => {
+        const existing = prev[targetDifficulty];
+        const fallbackQ: ChallengeQuestion = {
+          id: -1,   // HARDCODED sentinel — see note above
+          number: existing.length + 1,
+          title: `Dynamic Interview Probe: ${projectTopic}`,
+          description: `Please write an efficient implementation matching your project parameters for: ${projectName}. (Backend API Generation Failed)`,
+          hint: `Focus on clean algorithmic structural decomposition.`,
+          starterCode: `// API offline fallback code execution scope\nfunction solution() {\n  \n}`
+        };
+        return { ...prev, [targetDifficulty]: [...existing, fallbackQ] };
+      });
+      setIndexByDifficulty(prev => ({
+        ...prev,
+        [targetDifficulty]: questionsByDifficulty[targetDifficulty].length
+      }));
     } finally {
       setIsGeneratingQuestion(false);
     }
   };
 
-  // --- 2. AUTOMATIC INITIAL QUESTION TRIGGER ON LOAD ---
+  // ==========================================================================
+  // STEP 2 — LOAD SAVED QUESTIONS FROM THE DATABASE ON PAGE LOAD (Round 2)
+  // Fetches GET /api/projects/{id}/questions first, so returning users see
+  // their old questions instead of fresh ones every time. Only generates a
+  // new question for the active difficulty if it truly has nothing saved yet.
+  // ==========================================================================
   useEffect(() => {
-    if (projectName && projectTopic && questions.length === 0) {
-      generateLLMQuestion();
-      
-      setMessages([
-        {
-          id: 'welcome',
-          sender: 'ai',
-          aiUsed: selectedAI,
-          text: `Welcome John! I'm dynamically compiling custom ${difficulty} interview vectors for "${projectName}" based on your topic focus: "${projectTopic}"...`,
-          timestamp: new Date()
+    const loadQuestions = async () => {
+      try {
+        const res = await fetch(`http://localhost:8000/api/projects/${projectId}/questions`);
+        const saved: {
+          id: number;           // NEW (Round 3) — real DB row id, comes from ProjectQuestionOut
+          difficulty: Difficulty;
+          number: number;
+          title: string;
+          description: string;
+          hint: string;
+          starter_code: string; // backend uses snake_case, frontend uses camelCase — mapped below
+        }[] = await res.json();
+
+        // Group the flat list coming back from the DB into our three buckets
+        const grouped: Record<Difficulty, ChallengeQuestion[]> = { Easy: [], Medium: [], Hard: [] };
+        for (const q of saved) {
+          grouped[q.difficulty].push({
+            id: q.id,   // NEW (Round 3)
+            number: q.number,
+            title: q.title,
+            description: q.description,
+            hint: q.hint,
+            starterCode: q.starter_code
+          });
         }
-      ]);
+        // Backend already orders by (difficulty, number), but sort defensively anyway
+        (Object.keys(grouped) as Difficulty[]).forEach(d => grouped[d].sort((a, b) => a.number - b.number));
+
+        setQuestionsByDifficulty(grouped);
+        // Point each difficulty's index at its LAST saved question (most recent),
+        // or 0 if that difficulty has none yet.
+        setIndexByDifficulty({
+          Easy: Math.max(grouped.Easy.length - 1, 0),
+          Medium: Math.max(grouped.Medium.length - 1, 0),
+          Hard: Math.max(grouped.Hard.length - 1, 0)
+        });
+
+        // Only the ACTIVE difficulty gets auto-generated if it's empty.
+        // (If the user later switches to a different empty difficulty,
+        // handleDifficultyChange below handles that separately.)
+        if (grouped[difficulty].length === 0) {
+          await generateLLMQuestion(difficulty);
+        }
+
+        setMessages([
+          {
+            id: 'welcome',
+            sender: 'ai',
+            aiUsed: selectedAI,
+            text: `Welcome! I'm dynamically compiling custom ${difficulty} interview vectors for "${projectName}" based on your topic focus: "${projectTopic}"...`,
+            timestamp: new Date()
+          }
+        ]);
+      } catch (e) {
+        console.error("Failed to load saved questions:", e);
+        // If the DB fetch itself fails (backend down, network issue), fall
+        // back to generating a fresh question so the page still works.
+        await generateLLMQuestion(difficulty);
+      }
+    };
+
+    if (projectName && projectTopic) {
+      loadQuestions();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectName, projectTopic]);
 
-  // --- 3. DYNAMIC SYNC WHEN DIFFICULTY SELECTOR CHANGED ---
-  const handleDifficultyChange = (level: 'Easy' | 'Medium' | 'Hard') => {
+  // ==========================================================================
+  // STEP 3 — DIFFICULTY TAB CLICKED (Round 1)
+  // Only generates a new question if that difficulty's list is still empty —
+  // switching back to a difficulty you've already visited just shows what's
+  // already there instead of silently adding another question every time.
+  // ==========================================================================
+  const handleDifficultyChange = (level: Difficulty) => {
     setDifficulty(level);
-    // Request a fresh contextual problem with the updated difficulty level right away
-    generateLLMQuestion(level);
+    if (questionsByDifficulty[level].length === 0) {
+      generateLLMQuestion(level);
+    }
   };
 
-  // --- 4. LOCAL STORAGE SYNC ---
+  // ==========================================================================
+  // STEP 4 — LOCAL STORAGE SYNC FOR THE CODE EDITOR (Round 1)
+  // Storage key includes `difficulty` — Easy Q1 and Hard Q1 both exist
+  // independently (numbering restarts per difficulty), so without this,
+  // one would silently overwrite the other's saved code.
+  // ==========================================================================
   useEffect(() => {
     if (!activeQuestion) return;
-    const storageKey = `workspace_${projectId}_q${activeQuestion.number}`;
+    const storageKey = `workspace_${projectId}_${difficulty}_q${activeQuestion.number}`;
     const savedProgress = localStorage.getItem(storageKey);
-    
+
     if (savedProgress) {
       setCodeSnippet(savedProgress);
     } else {
       setCodeSnippet(activeQuestion.starterCode);
     }
     setShowHint(false);
-  }, [projectId, currentQuestionIndex, activeQuestion]);
+  }, [projectId, difficulty, currentQuestionIndex, activeQuestion]);
+
+  // ==========================================================================
+  // STEP 5 — LOAD EVALUATION HISTORY FOR THE ACTIVE QUESTION (NEW, Round 3)
+  // Every time the active question changes (switching Prev/Next, switching
+  // difficulty, or a fresh question just got generated), fetch every past
+  // evaluation attempt for THIS specific question id and store it for display.
+  // Skips the fetch entirely for fallback questions (id: -1, see note above),
+  // since those were never saved and have nothing to fetch.
+  // ==========================================================================
+  useEffect(() => {
+    const loadEvaluations = async () => {
+      if (!activeQuestion || activeQuestion.id < 0) {
+        setEvaluationHistory([]);
+        return;
+      }
+      try {
+        const res = await fetch(`http://localhost:8000/api/questions/${activeQuestion.id}/evaluations`);
+        const data: EvaluationRecord[] = await res.json();
+        setEvaluationHistory(data);
+      } catch (e) {
+        console.error("Failed to load evaluation history:", e);
+        setEvaluationHistory([]);
+      }
+    };
+    loadEvaluations();
+  }, [activeQuestion]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -159,7 +374,8 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
     setIsSaving(true);
     setSaveStatus('idle');
     try {
-      const storageKey = `workspace_${projectId}_q${activeQuestion.number}`;
+      // (Round 1) key includes difficulty — see STEP 4 note above
+      const storageKey = `workspace_${projectId}_${difficulty}_q${activeQuestion.number}`;
       localStorage.setItem(storageKey, codeSnippet);
       await new Promise((resolve) => setTimeout(resolve, 400));
       setSaveStatus('saved');
@@ -170,6 +386,7 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
     }
   };
 
+  // --- CHAT WITH THE SELECTED AI (unchanged — still uses selectedAI, not locked to Gemini) ---
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!chatInput.trim() || isAiTyping) return;
@@ -221,12 +438,17 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
     }
   };
 
-  // --- FIXED: PARSING DYNAMIC ERROR LOG METRICS ---
+  // --- EVALUATE CURRENT CODE ---
+  // (Round 1) localStorage key includes difficulty.
+  // (Round 3) request body now includes question_id so the backend can save
+  // this attempt against the right row in project_questions, and after a
+  // successful evaluation this component re-fetches the history so the new
+  // attempt shows up immediately without needing a page refresh.
   const handleCheckAnswer = async () => {
     if (isEvaluating || !activeQuestion) return;
     setIsEvaluating(true);
-    
-    const latestSavedCode = localStorage.getItem(`workspace_${projectId}_q${activeQuestion.number}`) || codeSnippet;
+
+    const latestSavedCode = localStorage.getItem(`workspace_${projectId}_${difficulty}_q${activeQuestion.number}`) || codeSnippet;
 
     setMessages(prev => [...prev, {
       id: Math.random().toString(),
@@ -243,24 +465,36 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
           engine: selectedAI,
           code_context: latestSavedCode,
           difficulty_context: difficulty,
+          question_id: activeQuestion.id,   // NEW (Round 3)
           question_number: activeQuestion.number,
           question_title: activeQuestion.title,
           project_context: { name: projectName, topic: projectTopic }
         })
       });
-      
+
       const data = await response.json();
-      
-      // Fixed logic: Render whatever message or compilation summary your backend returns directly!
+
       setMessages(prev => [...prev, {
         id: Math.random().toString(),
         sender: 'ai',
         aiUsed: selectedAI,
-        text: data.success 
-          ? data.reply 
+        text: data.success
+          ? data.reply
           : `⚠️ Evaluation Failed: ${data.reply || data.error || "The grading engine returned an explicitly non-successful runtime signature."}`,
         timestamp: new Date()
       }]);
+
+      // NEW (Round 3): refresh the evaluation history right after a successful
+      // grade, so the new attempt appears without needing a page reload.
+      if (data.success && activeQuestion.id >= 0) {
+        try {
+          const historyRes = await fetch(`http://localhost:8000/api/questions/${activeQuestion.id}/evaluations`);
+          const historyData: EvaluationRecord[] = await historyRes.json();
+          setEvaluationHistory(historyData);
+        } catch (historyErr) {
+          console.error("Failed to refresh evaluation history:", historyErr);
+        }
+      }
     } catch (error: any) {
       console.error(error);
       setMessages(prev => [...prev, {
@@ -277,7 +511,7 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col font-sans">
-      
+
       {/* HEADER BAR */}
       <header className="bg-slate-950 border-b border-slate-800 px-6 py-4 flex items-center justify-between shadow-md">
         <div className="flex items-center gap-4">
@@ -303,8 +537,8 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
                 type="button"
                 onClick={() => handleDifficultyChange(level)}
                 className={`px-2 py-1 rounded transition-all font-semibold ${
-                  difficulty === level 
-                    ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' 
+                  difficulty === level
+                    ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
                     : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
@@ -332,10 +566,10 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
 
       {/* SPLIT LAYOUT */}
       <div className="flex flex-1 overflow-hidden">
-        
+
         {/* LEFT PANEL: QUESTION DESCRIPTION & WORKBENCH */}
         <section className="w-1/2 p-4 flex flex-col border-r border-slate-800 bg-slate-950/40 overflow-y-auto">
-          
+
           {isGeneratingQuestion ? (
             <div className="bg-slate-950 border border-slate-800/80 rounded-xl p-8 mb-4 flex flex-col items-center justify-center gap-3 animate-pulse">
               <span className="w-6 h-6 border-2 border-purple-500 border-t-transparent rounded-full animate-spin"></span>
@@ -347,12 +581,13 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
                 <span className="text-xs font-bold text-blue-400 tracking-wider uppercase">
                   Problem Context Vector {activeQuestion.number} of {questions.length}
                 </span>
-                
+
                 <div className="flex items-center gap-1.5">
                   <button
                     type="button"
                     disabled={currentQuestionIndex === 0}
-                    onClick={() => setCurrentQuestionIndex(prev => prev - 1)}
+                    // (Round 1) only moves the index for the CURRENT difficulty
+                    onClick={() => setIndexByDifficulty(prev => ({ ...prev, [difficulty]: prev[difficulty] - 1 }))}
                     className="p-1 px-2.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-30 border border-slate-800 text-xs font-medium rounded transition-colors"
                   >
                     &larr; Prev
@@ -360,7 +595,7 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
                   <button
                     type="button"
                     disabled={currentQuestionIndex === questions.length - 1}
-                    onClick={() => setCurrentQuestionIndex(prev => prev + 1)}
+                    onClick={() => setIndexByDifficulty(prev => ({ ...prev, [difficulty]: prev[difficulty] + 1 }))}
                     className="p-1 px-2.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-30 border border-slate-800 text-xs font-medium rounded transition-colors"
                   >
                     Next &rarr;
@@ -377,7 +612,7 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
 
               <h2 className="text-base font-bold text-white mb-1">{activeQuestion.title}</h2>
               <p className="text-xs text-slate-300 leading-relaxed mb-3">{activeQuestion.description}</p>
-              
+
               <div className="pt-2 border-t border-slate-900">
                 {!showHint ? (
                   <button
@@ -394,7 +629,36 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
                   </div>
                 )}
               </div>
-            </div>
+
+              {/* NEW (Round 3) — past evaluation attempts for this exact question */}
+             {evaluationHistory.length > 0 && (
+  <div className="mt-3 pt-3 border-t border-slate-900 space-y-2">
+    <span className="text-xs font-bold text-emerald-400 tracking-wider uppercase block">
+      Past Evaluations ({evaluationHistory.length})
+    </span>
+    {evaluationHistory.map((ev, i) => {
+      const isExpanded = expandedEvals.has(ev.id);
+      return (
+        <div key={ev.id} className="bg-slate-900/60 border border-slate-800 rounded-lg p-2 text-xs">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-slate-500">Attempt {i + 1} · {ev.engine || 'unknown engine'}</span>
+            <button
+              type="button"
+              onClick={() => toggleEvalExpanded(ev.id)}
+              className="text-blue-400 hover:text-blue-300 font-semibold"
+            >
+              {isExpanded ? 'Collapse ▲' : 'Expand ▼'}
+            </button>
+          </div>
+          <div className={`text-slate-300 whitespace-pre-wrap ${isExpanded ? '' : 'line-clamp-3'}`}>
+            {ev.evaluation_text}
+          </div>
+        </div>
+      );
+    })}
+  </div>
+)}        
+           </div>
           ) : (
             <div className="bg-slate-950 border border-slate-800 rounded-xl p-6 mb-4 text-center text-xs text-slate-400">
               No active test vector loaded. Click "Generate New" above to query your chosen backend runner.
@@ -418,7 +682,7 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
                 </button>
               </div>
             </div>
-            
+
             <textarea
               value={codeSnippet}
               onChange={(e) => setCodeSnippet(e.target.value)}
@@ -427,25 +691,25 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
           </div>
         </section>
 
-        {/* RIGHT PANEL: CHAT SYSTEM & LIVE EVALUATION ENGINE */}
+        {/* RIGHT PANEL: CHAT SYSTEM & LIVE EVALUATION ENGINE (unchanged) */}
         <section className="w-1/2 flex flex-col bg-slate-900">
-          
+
           <div className="flex bg-slate-950/60 border-b border-slate-800 px-4 text-xs">
-            <button 
+            <button
               type="button"
               onClick={() => setActiveTab('ai-chat')}
               className={`py-3 px-4 font-semibold border-b-2 transition-colors ${activeTab === 'ai-chat' ? 'border-blue-500 text-blue-400' : 'border-transparent text-slate-400 hover:text-slate-200'}`}
             >
               🤖 {selectedAI} Assistant
             </button>
-            <button 
+            <button
               type="button"
               onClick={() => setActiveTab('expert-qa')}
               className={`py-3 px-4 font-semibold border-b-2 transition-colors ${activeTab === 'expert-qa' ? 'border-blue-500 text-blue-400' : 'border-transparent text-slate-400 hover:text-slate-200'}`}
             >
               👑 Premium Help
             </button>
-            <button 
+            <button
               type="button"
               onClick={() => setActiveTab('video-call')}
               className={`py-3 px-4 font-semibold border-b-2 transition-colors ${activeTab === 'video-call' ? 'border-blue-500 text-blue-400' : 'border-transparent text-slate-400 hover:text-slate-200'}`}
@@ -457,14 +721,14 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
           <div className="flex-1 p-6 overflow-y-auto flex flex-col justify-between min-h-0">
             {activeTab === 'ai-chat' && (
               <div className="flex flex-col h-full justify-between flex-1">
-                
+
                 <div className="space-y-4 text-sm overflow-y-auto flex-1 pr-1 pb-4">
                   {messages.map((msg) => (
-                    <div 
-                      key={msg.id} 
+                    <div
+                      key={msg.id}
                       className={`p-4 rounded-xl max-w-[85%] border transition-all ${
-                        msg.sender === 'user' 
-                          ? 'bg-blue-800/40 border-slate-700/30 ml-auto text-blue-200 text-right' 
+                        msg.sender === 'user'
+                          ? 'bg-blue-800/40 border-slate-700/30 ml-auto text-blue-200 text-right'
                           : 'bg-slate-950 border-slate-800 text-slate-300 mr-auto'
                       }`}
                     >
@@ -523,8 +787,8 @@ export default function WorkspacePage({ params }: WorkspacePageProps) {
                       placeholder={`Ask ${selectedAI} relative architecture hints...`}
                       className="flex-1 bg-slate-950 text-slate-200 text-xs sm:text-sm rounded-lg px-4 border border-slate-800 focus:outline-none focus:border-blue-500/50 disabled:opacity-50"
                     />
-                    <button 
-                      type="submit" 
+                    <button
+                      type="submit"
                       disabled={isAiTyping || isEvaluating}
                       className="bg-slate-800 hover:bg-slate-700 disabled:bg-slate-800/40 text-white font-semibold text-xs px-4 py-2.5 rounded-lg border border-slate-700 transition-colors"
                     >

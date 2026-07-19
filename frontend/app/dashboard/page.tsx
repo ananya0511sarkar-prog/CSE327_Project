@@ -1,53 +1,130 @@
 "use client";
 
 import Link from 'next/link';
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+
+interface UserProfile {
+  id: number;
+  email: string;
+  role: string;
+  phone_number: string | null;
+  tech_stack: string[];
+  summary: string | null;
+}
+
+interface Project {
+  id: number;
+  title: string;
+  status: string;
+  details: string;
+  ai_engine: string;
+}
+
+const getStatusColor = (status: string) => {
+  if (status === "Complete") return "text-emerald-600 bg-emerald-50";
+  if (status === "Action Required") return "text-blue-600 bg-blue-50";
+  return "text-amber-600 bg-amber-50"; // In Progress / default
+};
 
 export default function DashboardPage() {
-   useEffect(() => {
-    const token = localStorage.getItem("token");
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
 
-    console.log("Token:", token);
+  // --- Phone number edit state ---
+  const [isEditingPhone, setIsEditingPhone] = useState(false);
+  const [phoneInput, setPhoneInput] = useState('');
+  const [savingPhone, setSavingPhone] = useState(false);
 
-    if (token) {
-      const payload = JSON.parse(atob(token.split(".")[1]));
-      console.log("Payload:", payload);
-    }
+  // --- Tech stack edit state ---
+  const [newSkillInput, setNewSkillInput] = useState('');
+  const [savingSkills, setSavingSkills] = useState(false);
+
+  const authHeaders = () => ({
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${localStorage.getItem("token")}`
+  });
+
+  // Fetch profile + projects on load
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const [profileRes, projectsRes] = await Promise.all([
+          fetch("http://localhost:8000/api/users/me", { headers: authHeaders() }),
+          fetch("http://localhost:8000/api/projects", { headers: authHeaders() })
+        ]);
+        const profileData = await profileRes.json();
+        const projectsData = await projectsRes.json();
+        setProfile(profileData);
+        setPhoneInput(profileData.phone_number || '');
+        setProjects(projectsData);
+      } catch (err) {
+        console.error("Failed to load dashboard data:", err);
+      }
+    };
+    fetchData();
   }, []);
-  // Mock data for previous projects
-  const previousProjects = [
-    {
-      id: 1,
-      title: "Project 1: FAANG Coding Challenges",
-      status: "Complete",
-      statusColor: "text-emerald-600 bg-emerald-50",
-      score: "85% Score",
-      summary: "FAANG Coding Challenges, project structure of coding challenges and discuss design contents and project..."
-    },
-    {
-      id: 2,
-      title: "Project 2: System Design for Scale",
-      status: "Complete",
-      statusColor: "text-emerald-600 bg-emerald-50",
-      score: "78% Score",
-      summary: "System Design for Scale to consent project, design interior connection and near-code interviews and projects..."
-    },
-    {
-      id: 3,
-      title: "Project 3: Behavioral Questions Practice",
-      status: "In Progress",
-      statusColor: "text-amber-600 bg-amber-50",
-      score: "60% Complete",
-      summary: "Behavioral questions practice, and interaction-relevant behavioral questions practice in behavioral practices."
+
+  // --- Phone number handlers ---
+  const savePhoneNumber = async (newValue: string) => {
+    if (!profile) return;
+    setSavingPhone(true);
+    try {
+      const res = await fetch("http://localhost:8000/api/users/me", {
+        method: "PATCH",
+        headers: authHeaders(),
+        body: JSON.stringify({ phone_number: newValue })
+      });
+      const updated = await res.json();
+      setProfile(updated);
+      setPhoneInput(updated.phone_number || '');
+    } catch (err) {
+      console.error("Failed to update phone number:", err);
+    } finally {
+      setSavingPhone(false);
+      setIsEditingPhone(false);
     }
-  ];
+  };
+
+  const removePhoneNumber = () => savePhoneNumber('');
+
+  // --- Tech stack handlers ---
+  const saveTechStack = async (newStack: string[]) => {
+    if (!profile) return;
+    setSavingSkills(true);
+    try {
+      const res = await fetch("http://localhost:8000/api/users/me", {
+        method: "PATCH",
+        headers: authHeaders(),
+        body: JSON.stringify({ tech_stack: newStack })
+      });
+      const updated = await res.json();
+      setProfile(updated);
+    } catch (err) {
+      console.error("Failed to update tech stack:", err);
+    } finally {
+      setSavingSkills(false);
+    }
+  };
+
+  const addSkill = () => {
+    if (!newSkillInput.trim() || !profile) return;
+    const updatedStack = [...(profile.tech_stack || []), newSkillInput.trim()];
+    saveTechStack(updatedStack);
+    setNewSkillInput('');
+  };
+
+ const removeSkill = (index: number) => {
+    if (!profile) return;
+    const updatedStack = (profile.tech_stack || []).filter((_, i) => i !== index);
+    saveTechStack(updatedStack);
+  };
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans">
-      
+
       {/* MAIN CONTAINER */}
       <div className="flex flex-1">
-        
+
         {/* LEFT NAVIGATION SIDEBAR */}
         <aside className="w-64 bg-slate-900 text-slate-300 flex flex-col justify-between p-4 shrink-0">
           <div>
@@ -63,8 +140,8 @@ export default function DashboardPage() {
                   <path fillRule="evenodd" d="M18.685 19.097A9.723 9.723 0 0021.75 12c0-5.385-4.365-9.75-9.75-9.75S2.25 6.615 2.25 12c0 2.654 1.057 5.063 2.769 6.843.048.05.084.111.104.177A11.966 11.966 0 0012 21c2.569 0 4.978-.813 6.953-2.195a.23.23 0 01.1-.114zM12 6.75a3.25 3.25 0 100 6.5 3.25 3.25 0 000-6.5z" clipRule="evenodd" />
                 </svg>
               </div>
-              <h3 className="text-white font-semibold text-base">John Doe</h3>
-              <p className="text-xs text-slate-500 mt-0.5">Aspiring Software Engineer</p>
+              <h3 className="text-white font-semibold text-base">{profile?.email || 'Loading...'}</h3>
+              <p className="text-xs text-slate-500 mt-0.5 capitalize">{profile?.role || ''}</p>
             </div>
 
             {/* Nav Routes */}
@@ -112,24 +189,83 @@ export default function DashboardPage() {
 
           {/* TWO VERTICAL SECTIONS (RESUME STYLE MAP) */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
-            
+
             {/* LEFT SECTION: USER INFO & RESUME SUMMARY */}
             <section className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm space-y-6">
               <h2 className="text-xl font-bold text-slate-900 border-b border-slate-100 pb-2">
                 User Info & Summary
               </h2>
-              
+
               {/* Profile Meta Row */}
               <div className="flex flex-col sm:flex-row gap-5 items-start sm:items-center">
                 <div className="w-24 h-28 bg-slate-100 rounded-md shrink-0 flex items-center justify-center text-slate-300 border border-slate-200 overflow-hidden">
-                  {/* Generic avatar matching image placement */}
                   <svg className="w-16 h-16" fill="currentColor" viewBox="0 0 24 24"><path fillRule="evenodd" d="M7.5 6a4.5 4.5 0 119 0 4.5 4.5 0 01-9 0zM3.751 20.105a8.25 8.25 0 0116.498 0 .75.75 0 01-.437.695A18.683 18.683 0 0112 22.5c-2.786 0-5.433-.608-7.812-1.7a.75.75 0 01-.437-.695z" clipRule="evenodd" /></svg>
                 </div>
-                <div className="space-y-1 text-sm text-slate-600">
-                  <h3 className="text-2xl font-bold text-slate-900">John Doe</h3>
+                <div className="space-y-1 text-sm text-slate-600 w-full">
+                  <h3 className="text-2xl font-bold text-slate-900">{profile?.email || 'Loading...'}</h3>
                   <p className="font-semibold text-slate-800">Contact info</p>
-                  <p className="flex items-center gap-2">✉ johndoe@email.com</p>
-                  <p className="flex items-center gap-2">📞 (555) 123-4567</p>
+                  <p className="flex items-center gap-2">✉ {profile?.email}</p>
+
+                  {/* --- PHONE NUMBER: add / save / remove --- */}
+                  <div className="flex items-center gap-2">
+                    <span>📞</span>
+                    {isEditingPhone ? (
+                      <>
+                        <input
+                          type="tel"
+                          value={phoneInput}
+                          onChange={(e) => setPhoneInput(e.target.value)}
+                          placeholder="e.g. +880 1XXX-XXXXXX"
+                          className="border border-slate-300 rounded px-2 py-1 text-sm flex-1"
+                        />
+                        <button
+                          type="button"
+                          disabled={savingPhone}
+                          onClick={() => savePhoneNumber(phoneInput)}
+                          className="text-xs font-semibold text-emerald-600 hover:underline"
+                        >
+                          {savingPhone ? 'Saving...' : 'Save'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setIsEditingPhone(false); setPhoneInput(profile?.phone_number || ''); }}
+                          className="text-xs font-semibold text-slate-400 hover:underline"
+                        >
+                          Cancel
+                        </button>
+                      </>
+                    ) : profile?.phone_number ? (
+                      <>
+                        <span>{profile.phone_number}</span>
+                        <button
+                          type="button"
+                          onClick={() => setIsEditingPhone(true)}
+                          className="text-xs font-semibold text-blue-600 hover:underline"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          onClick={removePhoneNumber}
+                          className="text-xs font-semibold text-rose-600 hover:underline"
+                        >
+                          Remove
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <span className="italic text-slate-400">(not given)</span>
+                        <button
+                          type="button"
+                          onClick={() => setIsEditingPhone(true)}
+                          className="text-xs font-semibold text-blue-600 hover:underline"
+                        >
+                          Add
+                        </button>
+                      </>
+                    )}
+                  </div>
+
                   <Link href="#" className="text-blue-600 hover:underline inline-block">in LinkedIn</Link>
                 </div>
               </div>
@@ -138,61 +274,94 @@ export default function DashboardPage() {
               <div className="space-y-2">
                 <h4 className="font-bold text-slate-900">Summary</h4>
                 <p className="text-sm text-slate-600 leading-relaxed">
-                  John is a dedicated professional utilizing simulation software to build a structured approach 
-                  to coding framework experiences, while enhancing systems engineering practices. Has vast analytical skills 
-                  and client-facing competencies looking forward to landing roles inside core developer environments.
+                  {profile?.summary || 'No summary added yet.'}
                 </p>
               </div>
 
-              {/* Tech Stack List */}
+              {/* --- TECH STACK: add / save / remove --- */}
               <div className="space-y-2">
                 <h4 className="font-bold text-slate-900">Tech Stack & Skills</h4>
-                <ul className="list-disc list-inside text-sm text-slate-600 space-y-1 pl-1">
-                  <li>APIs & Software Engineering</li>
-                  <li>Python & Deep Learning</li>
-                  <li>System Design Architecture</li>
-                  <li>JavaScript / TypeScript</li>
-                  <li>Next.js Framework</li>
-                  <li>PostgreSQL & SQL Databases</li>
+                <ul className="text-sm text-slate-600 space-y-1">
+                  {(profile?.tech_stack || []).map((skill, index) => (
+                    <li key={index} className="flex items-center justify-between gap-2 group">
+                      <span className="flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-slate-400 inline-block" />
+                        {skill}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => removeSkill(index)}
+                        disabled={savingSkills}
+                        className="text-xs text-rose-500 hover:underline opacity-0 group-hover:opacity-100 transition-opacity"
+                      >
+                        Remove
+                      </button>
+                    </li>
+                  ))}
+                  {(!profile?.tech_stack || profile.tech_stack.length === 0) && (
+                    <li className="italic text-slate-400">No skills added yet.</li>
+                  )}
                 </ul>
+
+                <div className="flex gap-2 pt-1">
+                  <input
+                    type="text"
+                    value={newSkillInput}
+                    onChange={(e) => setNewSkillInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addSkill(); } }}
+                    placeholder="e.g. Docker & Kubernetes"
+                    className="border border-slate-300 rounded px-2 py-1 text-sm flex-1"
+                  />
+                  <button
+                    type="button"
+                    onClick={addSkill}
+                    disabled={savingSkills || !newSkillInput.trim()}
+                    className="text-xs font-semibold text-emerald-600 hover:underline disabled:opacity-40"
+                  >
+                    {savingSkills ? 'Saving...' : 'Add'}
+                  </button>
+                </div>
               </div>
             </section>
 
             {/* RIGHT SECTION: PROJECTS HUB */}
             <section className="space-y-6">
-              
+
               {/* Box A: Create New Project */}
               <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
                 <h2 className="text-xl font-bold text-slate-900 mb-4">My Interview Projects</h2>
-                <button className="w-full py-4 border-2 border-dashed border-slate-300 rounded-lg text-slate-600 font-medium hover:bg-slate-50 transition-colors flex items-center justify-center gap-2 group">
+                <Link
+                  href="/dashboard/projects"
+                  className="w-full py-4 border-2 border-dashed border-slate-300 rounded-lg text-slate-600 font-medium hover:bg-slate-50 transition-colors flex items-center justify-center gap-2 group"
+                >
                   <span className="w-6 h-6 bg-emerald-600 text-white rounded-full flex items-center justify-center text-lg font-bold group-hover:scale-105 transition-transform">+</span>
                   Create New Interview Project
-                </button>
+                </Link>
               </div>
 
-              {/* Box B: Previous Projects list */}
+              {/* Box B: Previous Projects list — now fetched from the database */}
               <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm space-y-4">
                 <h2 className="text-lg font-bold text-slate-900 border-b border-slate-100 pb-2">
                   Previous Projects
                 </h2>
-                
+
                 <div className="space-y-3">
-                  {previousProjects.map((project) => (
+                  {projects.length === 0 && (
+                    <p className="text-sm text-slate-400 italic">No projects yet — create one to get started.</p>
+                  )}
+                  {projects.map((project) => (
                     <div key={project.id} className="p-4 rounded-xl border border-slate-200 hover:border-slate-300 transition-colors bg-white">
                       <div className="flex justify-between items-start gap-4 mb-2">
                         <h4 className="font-bold text-slate-900 text-sm sm:text-base">
-                          {project.title}
+                          Project {project.id}: {project.title}
                         </h4>
-                        <span className="text-xs font-bold text-slate-500 whitespace-nowrap bg-slate-100 px-2 py-0.5 rounded">
-                          {project.score}
-                        </span>
                       </div>
-                      <span className={`inline-block px-2 py-0.5 rounded text-xs font-semibold mb-2 ${project.statusColor}`}>
+                      <span className={`inline-block px-2 py-0.5 rounded text-xs font-semibold mb-2 ${getStatusColor(project.status)}`}>
                         {project.status}
                       </span>
                       <p className="text-xs sm:text-sm text-slate-500 line-clamp-2">
                         <span className="font-semibold text-slate-700">Summary: </span>
-                        {project.summary}
+                        {project.details}
                       </p>
                     </div>
                   ))}

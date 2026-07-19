@@ -73,7 +73,7 @@ def create_access_token(data: dict) -> str:
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-
+from sqlalchemy import ARRAY
 # ─── DATABASE MODELS ────────────────────────────────────────────────
 class UserDB(Base):
     __tablename__ = "users"
@@ -81,15 +81,85 @@ class UserDB(Base):
     email = Column(String, unique=True, index=True)
     password = Column(String)
     role = Column(String)
+    #for dashboard page
+    phone_number = Column(String, nullable=True)
+    tech_stack = Column(ARRAY(String), nullable=True, default=list)
+    summary = Column(String, nullable=True)
+
+class UserProfileOut(BaseModel):
+    id: int
+    email: str
+    role: str
+    phone_number: Optional[str] = None
+    tech_stack: Optional[list[str]] = []
+    summary: Optional[str] = None
+    class Config:
+        from_attributes = True
+
+class UserProfileUpdate(BaseModel):
+    phone_number: Optional[str] = None
+    tech_stack: Optional[list[str]] = None
+    summary: Optional[str] = None
+
+from sqlalchemy import ForeignKey, DateTime, func
+
+class ProjectDB(Base):
+    __tablename__ = "projects"
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, nullable=False)
+    status = Column(String, default="In Progress")
+    details = Column(String)
+    ai_engine = Column(String)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+async def get_db():
+    async with AsyncSessionLocal() as db:
+        yield db
+
+from fastapi.security import OAuth2PasswordBearer
+from fastapi import status
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+
+async def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: AsyncSession = Depends(get_db)
+) -> UserDB:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            raise credentials_exception
+    except jwt.PyJWTError:
+        raise credentials_exception
+
+    result = await db.execute(select(UserDB).where(UserDB.email == email))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise credentials_exception
+    return user
+
+
+
+
 
 @app.on_event("startup")
 async def on_startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-async def get_db():
-    async with AsyncSessionLocal() as db:
-        yield db
+#async def get_db():
+    #async with AsyncSessionLocal() as db:
+        #yield db
+
+
+
 
 
 # ─── UPDATED REQUEST SCHEMAS TO MATCH NEXT.JS FRONTEND ──────────────
@@ -134,10 +204,74 @@ class EvaluateRequest(BaseModel):
     engine: str
     code_context: str
     difficulty_context: str
+    question_id: int          # NEW — which saved question this evaluation belongs to
     question_number: int
     question_title: str
     project_context: ProjectContext
 
+
+class ProjectCreate(BaseModel):
+    title: str
+    details: Optional[str] = None
+    ai_engine: str
+
+class ProjectOut(BaseModel):
+    id: int
+    title: str
+    status: str
+    details: Optional[str]
+    ai_engine: str
+
+    class Config:
+        from_attributes = True
+
+
+#to save questions in db
+class ProjectQuestionDB(Base):
+    __tablename__ = "project_questions"
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    difficulty = Column(String, nullable=False)  # "Easy" | "Medium" | "Hard"
+    number = Column(Integer, nullable=False)      # position within that difficulty
+    title = Column(String, nullable=False)
+    description = Column(String, nullable=False)
+    hint = Column(String, nullable=False)
+    starter_code = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class ProjectQuestionOut(BaseModel):
+    id: int
+    difficulty: str
+    number: int
+    title: str
+    description: str
+    hint: str
+    starter_code: str
+
+    class Config:
+        from_attributes = True
+
+
+#to save the answers in the db:
+class QuestionEvaluationDB(Base):
+    __tablename__ = "question_evaluations"
+    id = Column(Integer, primary_key=True, index=True)
+    question_id = Column(Integer, ForeignKey("project_questions.id"), nullable=False)
+    code_snapshot = Column(String, nullable=False)   # the code that was submitted for THIS attempt
+    evaluation_text = Column(String, nullable=False) # the LLM's reply for THIS attempt
+    engine = Column(String, nullable=True)            # which AI graded it
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class QuestionEvaluationOut(BaseModel):
+    id: int
+    question_id: int
+    code_snapshot: str
+    evaluation_text: str
+    engine: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
 
 # ─── AUTH ENDPOINTS ─────────────────────────────────────────────────
 @app.post("/api/auth/signup")
@@ -229,14 +363,86 @@ def call_live_llm(engine_choice: str, system_instructions: str, user_prompt: str
         raise ValueError("Invalid Engine Choice detected.")
 
 
+@app.get("/api/projects", response_model=list[ProjectOut])
+async def get_projects(
+    db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    result = await db.execute(select(ProjectDB).where(ProjectDB.owner_id == current_user.id))
+    return result.scalars().all()
+
+@app.post("/api/projects", response_model=ProjectOut)
+async def create_project(
+    payload: ProjectCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    new_project = ProjectDB(
+        title=payload.title,
+        details=payload.details,
+        ai_engine=payload.ai_engine,
+        owner_id=current_user.id
+    )
+    db.add(new_project)
+    await db.commit()
+    await db.refresh(new_project)
+    return new_project
+
+
+#for dashboard: 
+@app.get("/api/users/me", response_model=UserProfileOut)
+async def get_my_profile(current_user: UserDB = Depends(get_current_user)):
+    return current_user
+
+@app.patch("/api/users/me", response_model=UserProfileOut)
+async def update_my_profile(
+    payload: UserProfileUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    if payload.phone_number is not None:
+        current_user.phone_number = payload.phone_number
+    if payload.tech_stack is not None:
+        current_user.tech_stack = payload.tech_stack
+    if payload.summary is not None:
+        current_user.summary = payload.summary
+    await db.commit()
+    await db.refresh(current_user)
+    return current_user
+
+
+
+
+
+
+@app.get("/api/projects/{project_id}/questions", response_model=list[ProjectQuestionOut])
+async def get_project_questions(project_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(ProjectQuestionDB)
+        .where(ProjectQuestionDB.project_id == int(project_id))
+        .order_by(ProjectQuestionDB.difficulty, ProjectQuestionDB.number)
+    )
+    return result.scalars().all()
+
+
+
+@app.get("/api/questions/{question_id}/evaluations", response_model=list[QuestionEvaluationOut])
+async def get_question_evaluations(question_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(QuestionEvaluationDB)
+        .where(QuestionEvaluationDB.question_id == question_id)
+        .order_by(QuestionEvaluationDB.created_at)
+    )
+    return result.scalars().all()
+
 # ─── INTERACTIVE API SANDBOX ENDPOINTS ───────────────────────────────
 
 @app.post("/api/projects/{project_id}/generate-question")
-async def handle_question_generation(project_id: str, payload: GenerateQuestionRequest):
-    """
-    Generates a dynamic interview question focused on the user's project context 
-    and difficulty parameters, returning clean parseable JSON.
-    """
+async def handle_question_generation(
+    project_id: str,
+    payload: GenerateQuestionRequest,
+    db: AsyncSession = Depends(get_db)
+):
     try:
         system_context = (
             "You are a coding interview generator. You must generate a single tech question "
@@ -250,15 +456,14 @@ async def handle_question_generation(project_id: str, payload: GenerateQuestionR
             '  "starterCode": "function solve() {\\n\\n}"\n'
             "}"
         )
-        
+
         prompt = (
             f"Generate a customized coding challenge with difficulty level '{payload.difficulty}' "
             f"for a project named '{payload.project_name}' focused around this core topic field: '{payload.topic}'."
         )
-        
+
         raw_reply = call_live_llm(payload.engine, system_context, prompt).strip()
-        
-        # Strip codeblock wrappers if models return them despite explicit instructions
+
         if raw_reply.startswith("```"):
             lines = raw_reply.splitlines()
             if lines[0].startswith("```"):
@@ -268,15 +473,34 @@ async def handle_question_generation(project_id: str, payload: GenerateQuestionR
             raw_reply = "\n".join(lines).strip()
 
         parsed_question = json.loads(raw_reply)
-        return {"success": True, "question": parsed_question}
+
+        # count existing questions at this difficulty to assign the next number
+        result = await db.execute(
+            select(ProjectQuestionDB).where(
+                ProjectQuestionDB.project_id == int(project_id),
+                ProjectQuestionDB.difficulty == payload.difficulty
+            )
+        )
+        existing_count = len(result.scalars().all())
+
+        new_question = ProjectQuestionDB(
+            project_id=int(project_id),
+            difficulty=payload.difficulty,
+            number=existing_count + 1,
+            title=parsed_question["title"],
+            description=parsed_question["description"],
+            hint=parsed_question["hint"],
+            starter_code=parsed_question.get("starterCode", "// Write your solution here...")
+        )
+        db.add(new_question)
+        await db.commit()
+        await db.refresh(new_question)
+
+        return {"success": True, "question": parsed_question, "question_id": new_question.id}
 
     except Exception as e:
         print(f"Generation Error Trace: {str(e)}")
-        # Gracefully handle validation failure or fallback strings
-        return {
-            "success": False,
-            "error": f"Failed to synthesize valid code schema structures: {str(e)}"
-        }
+        return {"success": False, "error": f"Failed to synthesize valid code schema structures: {str(e)}"}
 
 
 @app.post("/api/projects/{project_id}/chat")
@@ -306,11 +530,11 @@ async def handle_workspace_chat(project_id: str, payload: ChatRequest):
 
 
 @app.post("/api/projects/{project_id}/evaluate")
-async def handle_workspace_evaluation(project_id: str, payload: EvaluateRequest):
-    """
-    Evaluates the code context alongside explicit metadata variables such as 
-    question indices, specific question details, and target track contexts.
-    """
+async def handle_workspace_evaluation(
+    project_id: str,
+    payload: EvaluateRequest,
+    db: AsyncSession = Depends(get_db)
+):
     try:
         evaluation_system = (
             "You are an automated code testing and architecture compiler evaluator. "
@@ -320,16 +544,30 @@ async def handle_workspace_evaluation(project_id: str, payload: EvaluateRequest)
             "Provide explicit markdown analysis detailing optimization criteria, runtime scale complexity alternatives, "
             "or structural bug concerns directly. Use clear formatting structural lists."
         )
-        
         user_eval_prompt = (
             f"Evaluate this script context for submission metrics:\n\n"
             f"```\n{payload.code_context}\n```"
         )
 
         evaluation_reply = call_live_llm(payload.engine, evaluation_system, user_eval_prompt)
+
+        # Save this attempt so it's visible when the user comes back to this question later
+        new_eval = QuestionEvaluationDB(
+            question_id=payload.question_id,
+            code_snapshot=payload.code_context,
+            evaluation_text=evaluation_reply,
+            engine=payload.engine
+        )
+        db.add(new_eval)
+        await db.commit()
+
         return {"success": True, "reply": evaluation_reply}
-        
+
     except Exception as e:
         print(f"Evaluation API Error Trace: {str(e)}")
-        # Pass raw detail back to client, allowing the custom frontend hook to show the precise error stack
         return {"success": False, "reply": f"Internal Evaluation Compilation Breakout: {str(e)}"}
+
+# Run once in Neon SQL Editor before restarting uvicorn:
+# ALTER TABLE users ADD COLUMN phone_number VARCHAR;
+# ALTER TABLE users ADD COLUMN tech_stack TEXT[];
+# ALTER TABLE users ADD COLUMN summary VARCHAR;

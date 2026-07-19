@@ -1,9 +1,13 @@
 "use client";
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
 
-// Types definition for our integrated feature set
+// ─── TYPES ────────────────────────────────────────────────────────
+// NOTE: expertSession is commented out for now — the paid live-session
+// feature (Ask Expert) isn't implemented in the backend yet. We'll add
+// it back once that feature is built. Keeping the shape here as a
+// reference so we remember what fields it'll need.
 interface Project {
   id: number;
   title: string;
@@ -12,13 +16,32 @@ interface Project {
   date: string;
   details: string;
   aiEngine?: 'ChatGPT-4o' | 'Gemini 1.5 Pro' | 'Claude 3.5 Sonnet';
-  expertSession?: {
-    type: 'Paid Q&A' | 'Video Mock Interview';
-    status: 'Scheduled' | 'Pending Payment' | 'Completed';
-    cost?: string;
-    dateText?: string;
-  };
+  // expertSession?: {
+  //   type: 'Paid Q&A' | 'Video Mock Interview';
+  //   status: 'Scheduled' | 'Pending Payment' | 'Completed';
+  //   cost?: string;
+  //   dateText?: string;
+  // };
 }
+
+// Maps status -> Tailwind badge classes (previously hardcoded per-project, now derived)
+const getBadgeColor = (status: string) => {
+  if (status === "Complete") return "text-emerald-600 bg-emerald-50 border-emerald-200";
+  if (status === "Action Required") return "text-blue-600 bg-blue-50 border-blue-200";
+  return "text-amber-600 bg-amber-50 border-amber-200"; // In Progress / default
+};
+
+// Converts a raw project object from the backend (snake_case) into
+// the shape our UI expects (camelCase + derived display fields).
+const mapApiProject = (p: any): Project => ({
+  id: p.id,
+  title: p.title,
+  status: p.status,
+  badgeColor: getBadgeColor(p.status),
+  date: new Date(p.created_at).toLocaleDateString('en-US', { month: 'long', day: '2-digit', year: 'numeric' }),
+  details: p.details,
+  aiEngine: p.ai_engine,
+});
 
 export default function ProjectsPage() {
   // State for showing the detailed project specs modal window
@@ -30,74 +53,51 @@ export default function ProjectsPage() {
   const [newDetails, setNewDetails] = useState('');
   const [newEngine, setNewEngine] = useState<'ChatGPT-4o' | 'Gemini 1.5 Pro' | 'Claude 3.5 Sonnet'>('Claude 3.5 Sonnet');
 
-  // Core Data Stack representing your platform pipelines
-  const [allProjects, setAllProjects] = useState<Project[]>([
-    { 
-      id: 1, 
-      title: "Project 1: FAANG Coding Challenges", 
-      status: "Complete", 
-      badgeColor: "text-emerald-600 bg-emerald-50 border-emerald-200", 
-      date: "June 12, 2026", 
-      details: "LeetCode patterns, graph traversals, and algorithmic problem-solving paradigms for tier-1 tech companies.",
-      aiEngine: "Claude 3.5 Sonnet"
-    },
-    { 
-      id: 2, 
-      title: "Project 2: System Design for Scale", 
-      status: "Complete", 
-      badgeColor: "text-emerald-600 bg-emerald-50 border-emerald-200", 
-      date: "June 08, 2026", 
-      details: "Architecting rate limiters, distributed caching layers, data sharding strategies, and load balancing mechanics.",
-      aiEngine: "ChatGPT-4o"
-    },
-    { 
-      id: 3, 
-      title: "Project 3: Behavioral Questions Practice", 
-      status: "In Progress", 
-      badgeColor: "text-amber-600 bg-amber-50 border-amber-200", 
-      date: "Started Yesterday", 
-      details: "Formulating STAR method responses for leadership, conflict resolution, and complex engineering challenges.",
-      aiEngine: "Gemini 1.5 Pro",
-      expertSession: {
-        type: "Paid Q&A",
-        status: "Completed",
-        cost: "$15.00"
-      }
-    },
-    { 
-      id: 4, 
-      title: "Project 4: Executive Mock Interview Session", 
-      status: "Action Required", 
-      badgeColor: "text-blue-600 bg-blue-50 border-blue-200", 
-      date: "Scheduled", 
-      details: "Live system architecture mapping breakdown session with a Principal Engineer from Netflix.",
-      expertSession: {
-        type: "Video Mock Interview",
-        status: "Scheduled",
-        cost: "$75.00",
-        dateText: "Tomorrow at 4:00 PM (GMT+6)"
-      }
-    }
-  ]);
+  // Real project data — now fetched from the backend/DB instead of hardcoded
+  const [allProjects, setAllProjects] = useState<Project[]>([]);
 
-  // Handler to provision a new project into our client stack
-  const handleProvisionProject = (e: React.FormEvent) => {
+  // Fetch this user's projects from the database on page load
+  useEffect(() => {
+    const fetchProjects = async () => {
+      const token = localStorage.getItem("token");
+      try {
+        const res = await fetch("http://localhost:8000/api/projects", {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const data = await res.json();
+        setAllProjects(data.map(mapApiProject));
+      } catch (err) {
+        console.error("Failed to fetch projects:", err);
+      }
+    };
+    fetchProjects();
+  }, []);
+
+  // Handler to provision a new project — now persists to the database via POST
+  const handleProvisionProject = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTitle.trim()) return;
 
-    const assignedId = allProjects.length + 1;
-    const provisionedTrack: Project = {
-      id: assignedId,
-      title: `Project ${assignedId}: ${newTitle.trim()}`,
-      status: "In Progress",
-      badgeColor: "text-amber-600 bg-amber-50 border-amber-200",
-      date: "Just Now",
-      details: newDetails.trim() || "No customized problem architecture instructions supplied yet.",
-      aiEngine: newEngine
-    };
+    const token = localStorage.getItem("token");
+    try {
+      const res = await fetch("http://localhost:8000/api/projects", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          title: newTitle.trim(),
+          details: newDetails.trim() || "No customized problem architecture instructions supplied yet.",
+          ai_engine: newEngine
+        })
+      });
+      const created = await res.json();
+      setAllProjects(prev => [...prev, mapApiProject(created)]);
+    } catch (err) {
+      console.error("Failed to create project:", err);
+    }
 
-    setAllProjects(prev => [...prev, provisionedTrack]);
-    
     // Reset structural tracking parameters back to default
     setNewTitle('');
     setNewDetails('');
@@ -166,6 +166,9 @@ export default function ProjectsPage() {
               >
                 {isCreating ? '✕ Close Form' : '➕ Create New Project'}
               </button>
+              {/* "Ask Expert (Paid)" button — kept visible as a UI placeholder,
+                  but not wired to anything yet since the paid live-session
+                  feature isn't built. Revisit when that feature is scoped. */}
               <button className="bg-white border border-slate-200 text-slate-800 hover:bg-slate-50 text-xs font-semibold py-2.5 px-4 rounded-lg shadow-sm transition-colors flex items-center gap-1.5">
                 <span className="w-2 h-2 rounded-full bg-blue-500"></span> Ask Expert (Paid)
               </button>
@@ -247,7 +250,7 @@ export default function ProjectsPage() {
                     <span className="text-xs text-slate-400 font-medium">{project.date}</span>
                   </div>
                   
-                  <h3 className="text-lg font-bold text-slate-900 mb-2">{project.title}</h3>
+                  <h3 className="text-lg font-bold text-slate-900 mb-2">Project {project.id}: {project.title}</h3>
                   <p className="text-sm text-slate-500 line-clamp-2 leading-relaxed mb-4">{project.details}</p>
                   
                   {/* METADATA TARGET API PIPELINES */}
@@ -260,7 +263,9 @@ export default function ProjectsPage() {
                         </span>
                       </div>
                     )}
-                    
+
+                    {/* Human Specialist row — commented out until the paid
+                        expert/live-session feature exists in the backend.
                     {project.expertSession && (
                       <div className="flex items-center gap-2 text-xs">
                         <span className="text-slate-400 font-medium">Human Specialist:</span>
@@ -274,6 +279,7 @@ export default function ProjectsPage() {
                         )}
                       </div>
                     )}
+                    */}
                   </div>
                 </div>
                 
@@ -288,10 +294,13 @@ export default function ProjectsPage() {
                   </button>
                   
                   <Link 
-                    href={`/dashboard/projects/${project.id}/workspace?name=${encodeURIComponent(project.title)}&topic=${encodeURIComponent(project.details)}&engine=${encodeURIComponent(project.aiEngine || 'Gemini 1.5 Pro')}`}
+                    //href={`/dashboard/projects/${project.id}/workspace?name=${encodeURIComponent(project.title)}&topic=${encodeURIComponent(project.details)}&engine=${encodeURIComponent(project.aiEngine || 'Gemini 1.5 Pro')}`}
+                    href={`/dashboard/projects/${project.id}/workspace?name=${encodeURIComponent(`Project ${project.id}: ${project.title}`)}&topic=${encodeURIComponent(project.details)}&engine=${encodeURIComponent(project.aiEngine || 'Gemini 1.5 Pro')}`}
                     className="flex-1 py-2 text-center text-xs font-semibold rounded-md bg-blue-600 hover:bg-blue-700 text-white shadow-sm transition-colors block"
                   >
-                    {project.expertSession?.type === "Video Mock Interview" ? "Join Video Call" : "Open Workspace"}
+                    {/* Was previously conditional on expertSession?.type === "Video Mock Interview" -> "Join Video Call".
+                        Simplified to always show "Open Workspace" until that feature returns. */}
+                    Open Workspace
                   </Link>
                 </div>
               </div>
@@ -317,7 +326,7 @@ export default function ProjectsPage() {
             <div className="flex justify-between items-start mb-4">
               <div>
                 <span className="text-xs uppercase tracking-wider font-bold text-blue-600">Project Configuration Specification</span>
-                <h2 className="text-xl font-bold text-slate-900 mt-0.5">{selectedProject.title}</h2>
+                <h2 className="text-xl font-bold text-slate-900 mt-0.5">Project {selectedProject.id}: {selectedProject.title}</h2>
               </div>
               <button 
                 type="button"
@@ -338,7 +347,7 @@ export default function ProjectsPage() {
                   <div className={`p-2 rounded border ${selectedProject.aiEngine === 'ChatGPT-4o' ? 'bg-emerald-50 border-emerald-300 text-emerald-800 font-bold' : 'bg-white text-slate-400 border-slate-200'}`}>
                     ChatGPT-4o
                   </div>
-                  <div className={`p-2 rounded border ${selectedProject.aiEngine === 'Gemini 1. Pro' || selectedProject.aiEngine === 'Gemini 1.5 Pro' ? 'bg-indigo-50 border-indigo-300 text-indigo-800 font-bold' : 'bg-white text-slate-400 border-slate-200'}`}>
+                  <div className={`p-2 rounded border ${selectedProject.aiEngine === 'Gemini 1.5 Pro' ? 'bg-indigo-50 border-indigo-300 text-indigo-800 font-bold' : 'bg-white text-slate-400 border-slate-200'}`}>
                     Gemini 1.5
                   </div>
                   <div className={`p-2 rounded border ${selectedProject.aiEngine === 'Claude 3.5 Sonnet' ? 'bg-amber-50 border-amber-300 text-amber-800 font-bold' : 'bg-white text-slate-400 border-slate-200'}`}>
@@ -347,7 +356,8 @@ export default function ProjectsPage() {
                 </div>
               </div>
 
-              {/* Specialist Integration Parameters */}
+              {/* Expert Verification Stream section — commented out until
+                  the paid expert/live-session feature is built.
               <div className="p-4 rounded-lg border border-slate-100 bg-blue-50/40 space-y-2">
                 <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wide">Expert Verification Stream</h4>
                 {selectedProject.expertSession ? (
@@ -363,6 +373,7 @@ export default function ProjectsPage() {
                   </div>
                 )}
               </div>
+              */}
             </div>
 
             <div className="mt-6 flex justify-end gap-2">
