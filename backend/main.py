@@ -1,4 +1,5 @@
 import os
+import io
 import json
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
@@ -17,6 +18,17 @@ import jwt
 from openai import OpenAI
 from google import genai
 from anthropic import Anthropic
+
+
+import pdfplumber
+from fastapi import UploadFile, File
+
+# NEW: added for multi-format study material support and PDF figure fallback
+import fitz          # PyMuPDF — renders PDF pages to images (used as a figure/cid-garbage fallback)
+import base64         # NEW: encodes rendered page images for JSON transport
+import re             # NEW: used to detect (cid:N) glyph-garbage in pdfplumber output
+from docx import Document as DocxDocument   # NEW: python-docx — for .docx text extraction
+from pptx import Presentation               # NEW: python-pptx — for .pptx text extraction
 
 # Load environment variables
 load_dotenv()
@@ -113,6 +125,33 @@ class ProjectDB(Base):
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+
+#for study page:
+class StudyDocumentDB(Base):
+    __tablename__ = "study_documents"
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    name = Column(String, nullable=False)
+    content = Column(String, nullable=False)
+    pages = Column(Integer, default=1)
+    # NEW: stores a JSON string list of {"page": n, "image_base64": "..."} for
+    # PDF pages that needed the PyMuPDF render fallback (empty/cid-garbage text,
+    # or figure-heavy pages pdfplumber can't represent as text).
+    page_images = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class StudyActionDB(Base):
+    __tablename__ = "study_actions"
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    document_name = Column(String, nullable=True)
+    action_type = Column(String, nullable=False)   # "summarize" | "explain" | "questions" | "chat"
+    engine = Column(String, nullable=False)
+    snippet_text = Column(String, nullable=False)
+    ai_reply = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
 async def get_db():
     async with AsyncSessionLocal() as db:
         yield db
@@ -186,7 +225,7 @@ class GenerateQuestionRequest(BaseModel):
     engine: str
 
 class ChatQuestionMetadata(BaseModel):
-    question_number: int
+    question_number: Optional[int] = None   # now optional — sandbox still sends it, study page doesn't need to
     title: str
     difficulty: str
 
@@ -225,6 +264,13 @@ class ProjectOut(BaseModel):
     class Config:
         from_attributes = True
 
+#for sudy page:
+class ProcessSnippetRequest(BaseModel):
+    engine: str
+    action: str
+    snippet: str
+    document_name: str
+    project_id: str
 
 #to save questions in db
 class ProjectQuestionDB(Base):
@@ -273,6 +319,24 @@ class QuestionEvaluationOut(BaseModel):
     class Config:
         from_attributes = True
 
+
+
+# === FIX 2: saved summaries/flashcards persistence ===
+# Response shape for GET /study/saved-items — one entry per saved
+# summarize/explain/questions result. Used to repopulate the "Saved
+# Summaries & Flashcards" tab from the DB every time the page loads.
+class SavedStudyItemOut(BaseModel):
+    id: int
+    document_name: Optional[str] = None
+    action_type: str
+    engine: str
+    snippet_text: str
+    ai_reply: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
 # ─── AUTH ENDPOINTS ─────────────────────────────────────────────────
 @app.post("/api/auth/signup")
 async def signup(payload: SignUpRequest, db: AsyncSession = Depends(get_db)):
@@ -284,6 +348,7 @@ async def signup(payload: SignUpRequest, db: AsyncSession = Depends(get_db)):
     if user_exists:
         return {"success": False, "message": "An account with this email already exists."}
     
+    # BCRYPT — used here:
     new_user = UserDB(email=clean_email, password=hash_password(payload.password), role=clean_role)
     db.add(new_user)
     await db.commit()
@@ -295,7 +360,9 @@ async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(UserDB).where(UserDB.email == clean_email))
     user = result.scalar_one_or_none()
     
+    # BCRYPT — used here:
     if user and verify_password(payload.password, user.password):
+        # JWT — used here, and only here:
         token = create_access_token({"sub": user.email, "role": user.role})
         return {"success": True, "token": token, "user": {"email": user.email, "role": user.role}}
     return {"success": False, "message": "Invalid credentials."}
@@ -504,14 +571,23 @@ async def handle_question_generation(
 
 
 @app.post("/api/projects/{project_id}/chat")
-async def handle_workspace_chat(project_id: str, payload: ChatRequest):
+async def handle_workspace_chat(
+    project_id: str,
+    payload: ChatRequest,
+    db: AsyncSession = Depends(get_db)
+):
     try:
         meta_context = ""
         if payload.question_metadata:
-            meta_context = (
-                f"They are working on Question #{payload.question_metadata.question_number}: "
-                f"\"{payload.question_metadata.title}\" under [{payload.question_metadata.difficulty}] constraints.\n"
-            )
+            if payload.question_metadata.question_number is not None:
+                # Coding sandbox — has a real question number
+                meta_context = (
+                    f"They are working on Question #{payload.question_metadata.question_number}: "
+                    f"\"{payload.question_metadata.title}\" under [{payload.question_metadata.difficulty}] constraints.\n"
+                )
+            else:
+                # Study page — just a document reference, no question number
+                meta_context = f"{payload.question_metadata.title}\n"
 
         system_context = (
             "You are an expert technical interview mentor. The user is writing code in their "
@@ -522,12 +598,23 @@ async def handle_workspace_chat(project_id: str, payload: ChatRequest):
         )
 
         ai_reply = call_live_llm(payload.engine, system_context, payload.message)
+
+        new_action = StudyActionDB(
+            project_id=int(project_id),
+            document_name=None,
+            action_type="chat",
+            engine=payload.engine,
+            snippet_text=payload.message,
+            ai_reply=ai_reply
+        )
+        db.add(new_action)
+        await db.commit()
+
         return {"success": True, "reply": ai_reply}
-        
+
     except Exception as e:
         print(f"API Error Trace: {str(e)}")
         return {"success": False, "reply": f"API Engine Error: {str(e)}"}
-
 
 @app.post("/api/projects/{project_id}/evaluate")
 async def handle_workspace_evaluation(
@@ -571,3 +658,292 @@ async def handle_workspace_evaluation(
 # ALTER TABLE users ADD COLUMN phone_number VARCHAR;
 # ALTER TABLE users ADD COLUMN tech_stack TEXT[];
 # ALTER TABLE users ADD COLUMN summary VARCHAR;
+
+
+# ─── NEW: HELPERS FOR MULTI-FORMAT STUDY DOCUMENT EXTRACTION ─────────
+
+# Threshold logic for deciding a PDF page's pdfplumber text is "unusable"
+# (empty, or dominated by (cid:N) glyph-ID garbage from font-encoding issues —
+# common in LaTeX/Beamer-exported PDFs missing a proper ToUnicode map).
+CID_GARBAGE_PATTERN = re.compile(r"\(cid:\d+\)")
+MIN_USABLE_TEXT_LENGTH = 20  # chars
+
+def _page_text_is_unusable(page_text: str) -> bool:
+    """Flags a page's extracted text as unusable if it's near-empty, or if
+    (cid:N) garbage makes up a large share of the extracted characters."""
+    stripped = page_text.strip()
+    if len(stripped) < MIN_USABLE_TEXT_LENGTH:
+        return True
+    cid_matches = CID_GARBAGE_PATTERN.findall(stripped)
+    if cid_matches and (sum(len(m) for m in cid_matches) / len(stripped)) > 0.15:
+        return True
+    return False
+
+
+def _extract_pdf(file_bytes: bytes):
+    """Extracts text page-by-page with pdfplumber AND renders every page as a
+    PNG via PyMuPDF, so the viewer shows pages exactly like the source PDF
+    (figures, diagrams, math notation included) while keeping the extracted
+    text available underneath each page for highlighting/search.
+    CHANGED: previously only rendered pages flagged as unreadable (empty or
+    cid:-garbled text). Now renders ALL pages, since even 'clean' text
+    extraction (like CNN.pdf) still misses embedded diagrams entirely —
+    pdfplumber only ever sees text, never pixels."""
+    extracted_text = ""
+    page_images = []  # NEW: now populated for every page, not just flagged ones
+
+    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        page_count = len(pdf.pages)
+        page_texts = [page.extract_text() or "" for page in pdf.pages]
+
+    fitz_doc = fitz.open(stream=file_bytes, filetype="pdf")
+    for i, page_text in enumerate(page_texts):
+        try:
+            fitz_page = fitz_doc.load_page(i)
+            # NOTE: dropped dpi from 150 -> 110 since every page renders now,
+            # to keep response payload manageable on larger PDFs.
+            pix = fitz_page.get_pixmap(dpi=110)
+            img_b64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
+            page_images.append({"page": i + 1, "image_base64": img_b64})
+        except Exception as render_err:
+            print(f"PyMuPDF render failed on page {i + 1}: {render_err}")
+
+        # marker is now inserted for every page (not just unusable ones),
+        # followed by the page's real text — frontend still needs the text
+        # for highlighting/search even though the image is now always shown.
+        extracted_text += f"\n\n[[PAGE_IMAGE:{i + 1}]]\n\n"
+        extracted_text += page_text + "\n\n"
+    fitz_doc.close()
+
+    return extracted_text.strip(), page_count, page_images
+
+
+def _extract_docx(file_bytes: bytes):
+    """Extracts text AND embedded images from a .docx file, in document order.
+    CHANGED: previously text-only. Now walks each paragraph's runs looking for
+    embedded image blips (inline pictures), extracts their raw bytes via the
+    run's relationship parts, and inserts the same [[PAGE_IMAGE:N]] marker
+    tokens the PDF extractor uses — so the frontend renders them identically,
+    no separate docx-specific frontend code needed."""
+    from docx.oxml.ns import qn
+
+    doc = DocxDocument(io.BytesIO(file_bytes))
+    extracted_text = ""
+    page_images = []
+    image_index = 0
+
+    for para in doc.paragraphs:
+        for run in para.runs:
+            # a:blip elements are how Word embeds inline images inside a run
+            blips = run._element.findall('.//' + qn('a:blip'))
+            for blip in blips:
+                rId = blip.get(qn('r:embed'))
+                if rId:
+                    try:
+                        image_part = run.part.related_parts[rId]
+                        image_index += 1
+                        img_b64 = base64.b64encode(image_part.blob).decode("utf-8")
+                        page_images.append({"page": image_index, "image_base64": img_b64})
+                        extracted_text += f"\n\n[[PAGE_IMAGE:{image_index}]]\n\n"
+                    except Exception as img_err:
+                        print(f"DOCX image extraction failed: {img_err}")
+        if para.text.strip():
+            extracted_text += para.text + "\n"
+
+    # page_count still approximates like before — .docx has no fixed page
+    # concept until rendered
+    page_count = max(1, (len(extracted_text) // 1000) + 1)
+    return extracted_text.strip(), page_count, page_images
+
+
+def _extract_pptx(file_bytes: bytes):
+    """Extracts text AND embedded pictures from every slide of a .pptx file.
+    CHANGED: previously text-only, page_images always returned empty. Now
+    walks each slide's shapes, and for any PICTURE-type shape, extracts its
+    raw image bytes via shape.image.blob and inserts a [[PAGE_IMAGE:N]]
+    marker — same marker format the PDF/DOCX extractors use, so the frontend
+    renders it identically with zero extra frontend code.
+    NOTE: python-pptx has no rendering engine, so this can only recover
+    inserted picture shapes — it cannot render a full slide as one image the
+    way PyMuPDF does for PDF pages. Charts, SmartArt, and shapes built from
+    vector drawing objects (not actual picture files) won't be captured this
+    way — only literal embedded images will."""
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+    prs = Presentation(io.BytesIO(file_bytes))
+    slide_texts = []
+    page_images = []
+    image_index = 0
+
+    for slide_number, slide in enumerate(prs.slides, start=1):
+        lines = []
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                for paragraph in shape.text_frame.paragraphs:
+                    line = "".join(run.text for run in paragraph.runs)
+                    if line.strip():
+                        lines.append(line)
+            if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                try:
+                    image_index += 1
+                    img_b64 = base64.b64encode(shape.image.blob).decode("utf-8")
+                    page_images.append({"page": image_index, "image_base64": img_b64})
+                    lines.append(f"[[PAGE_IMAGE:{image_index}]]")
+                except Exception as img_err:
+                    print(f"PPTX image extraction failed on slide {slide_number}: {img_err}")
+        if lines:
+            slide_texts.append(f"--- Slide {slide_number} ---\n" + "\n".join(lines))
+
+    extracted_text = "\n\n".join(slide_texts)
+    page_count = len(prs.slides)
+    return extracted_text.strip(), page_count, page_images
+
+
+def _extract_txt(file_bytes: bytes):
+    """NEW: decodes a plain .txt file as UTF-8, falling back to latin-1."""
+    try:
+        extracted_text = file_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        extracted_text = file_bytes.decode("latin-1", errors="ignore")
+    page_count = max(1, (len(extracted_text) // 1000) + 1)
+    return extracted_text.strip(), page_count, []
+
+
+#for study page:
+@app.post("/api/projects/{project_id}/study/process-snippet")
+async def handle_process_snippet(
+    project_id: str,
+    payload: ProcessSnippetRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    try:
+        action_prompts = {
+            "summarize": "Summarize the following text into 2-3 concise bullet points.",
+            "explain": "Explain the following concept in simple, plain language, using an analogy if it helps.",
+                # CHANGED: now asks for an answer after each question, clearly separated,
+    # so students can self-check without having to ask again.
+        "questions": (
+        "Generate 2-3 short practice questions based on the following text. "
+        "After EACH question, provide the answer on a new line prefixed with 'Answer:'. "
+        "Format each question as:\n\n"
+        "**Question N: [Title]**\n"
+        "[question text]\n\n"
+        "Answer: [clear, concise answer]\n"
+    )
+        }
+        system_context = action_prompts.get(payload.action, "Process the following text.")
+
+        ai_reply = call_live_llm(payload.engine, system_context, payload.snippet)
+
+        new_action = StudyActionDB(
+            project_id=int(project_id),
+            document_name=payload.document_name,
+            action_type=payload.action,
+            engine=payload.engine,
+            snippet_text=payload.snippet,
+            ai_reply=ai_reply
+        )
+        db.add(new_action)
+        await db.commit()
+        await db.refresh(new_action)  # === FIX 2: need id/created_at below ===
+
+        # === FIX 2: saved summaries/flashcards persistence ===
+        # Return the saved row's id + timestamp so the frontend can push this
+        # result straight into the "Saved Summaries & Flashcards" list right
+        # away, instead of doing a full refetch of /study/saved-items.
+        return {
+            "success": True,
+            "result": ai_reply,
+            "action_id": new_action.id,
+            "created_at": new_action.created_at.isoformat()
+        }
+
+        #return {"success": True, "result": ai_reply}
+
+    except Exception as e:
+        print(f"Study Snippet Error Trace: {str(e)}")
+        return {"success": False, "error": str(e)}
+    
+
+
+@app.post("/api/projects/{project_id}/study/upload-document")
+async def upload_study_document(
+    project_id: str,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db)
+):
+    try:
+        file_bytes = await file.read()
+        filename = file.filename or ""
+        extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+        # CHANGED: routes to the correct extractor based on file extension instead
+        # of assuming every upload is a PDF. Unsupported types now return a clear
+        # error instead of silently mis-parsing (which is what caused the old bug).
+        if extension == "pdf":
+            extracted_text, page_count, page_images = _extract_pdf(file_bytes)
+        elif extension == "docx":
+            extracted_text, page_count, page_images = _extract_docx(file_bytes)
+        elif extension == "pptx":
+            extracted_text, page_count, page_images = _extract_pptx(file_bytes)
+        elif extension == "txt":
+            extracted_text, page_count, page_images = _extract_txt(file_bytes)
+        else:
+            return {
+                "success": False,
+                "error": f"Unsupported file type: .{extension}. Supported: PDF, DOCX, PPTX, TXT."
+            }
+
+        if not extracted_text.strip():
+            extracted_text = "No extractable text found — this may be a scanned document (OCR support coming with the Expert page)."
+
+        new_doc = StudyDocumentDB(
+            project_id=int(project_id),
+            name=file.filename,
+            content=extracted_text.strip(),
+            pages=page_count,
+            # NEW: page-image fallbacks stored as a JSON string (None if there were none)
+            page_images=json.dumps(page_images) if page_images else None
+        )
+        db.add(new_doc)
+        await db.commit()
+        await db.refresh(new_doc)
+
+        return {
+            "success": True,
+            "document": {
+                "id": new_doc.id,
+                "name": new_doc.name,
+                "content": new_doc.content,
+                "pages": new_doc.pages,
+                # NEW: parsed back into a list for the frontend to render next to the text
+                "page_images": json.loads(new_doc.page_images) if new_doc.page_images else []
+            }
+        }
+
+    except Exception as e:
+        print(f"Document Upload Error Trace: {str(e)}")
+        return {"success": False, "error": str(e)}
+    
+
+#ALTER TABLE study_documents ADD COLUMN page_images VARCHAR;
+
+# === FIX 2: saved summaries/flashcards persistence ===
+@app.get("/api/projects/{project_id}/study/saved-items", response_model=list[SavedStudyItemOut])
+async def get_saved_study_items(project_id: str, db: AsyncSession = Depends(get_db)):
+    """
+    Returns every summarize/explain/questions result saved for this project
+    (plain chat messages are excluded — those aren't "study notes"), newest
+    first. The frontend calls this once when the Study page mounts, so the
+    tab always reflects what's actually in the DB and survives a refresh or
+    a logout/login — it's no longer just component state that resets.
+    """
+    result = await db.execute(
+        select(StudyActionDB)
+        .where(
+            StudyActionDB.project_id == int(project_id),
+            StudyActionDB.action_type.in_(["summarize", "explain", "questions"])
+        )
+        .order_by(StudyActionDB.created_at.desc())
+    )
+    return result.scalars().all()
