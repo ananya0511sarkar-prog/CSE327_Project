@@ -4,10 +4,11 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 
 // ─── TYPES ────────────────────────────────────────────────────────
-// NOTE: expertSession is commented out for now — the paid live-session
-// feature (Ask Expert) isn't implemented in the backend yet. We'll add
-// it back once that feature is built. Keeping the shape here as a
-// reference so we remember what fields it'll need.
+interface UserProfile {
+  email?: string;
+  role?: string;
+}
+
 interface Project {
   id: number;
   title: string;
@@ -16,23 +17,16 @@ interface Project {
   date: string;
   details: string;
   aiEngine?: 'ChatGPT-4o' | 'Gemini 1.5 Pro' | 'Claude 3.5 Sonnet';
-  // expertSession?: {
-  //   type: 'Paid Q&A' | 'Video Mock Interview';
-  //   status: 'Scheduled' | 'Pending Payment' | 'Completed';
-  //   cost?: string;
-  //   dateText?: string;
-  // };
 }
 
-// Maps status -> Tailwind badge classes (previously hardcoded per-project, now derived)
+// Maps status -> Tailwind badge classes
 const getBadgeColor = (status: string) => {
   if (status === "Complete") return "text-emerald-600 bg-emerald-50 border-emerald-200";
   if (status === "Action Required") return "text-blue-600 bg-blue-50 border-blue-200";
   return "text-amber-600 bg-amber-50 border-amber-200"; // In Progress / default
 };
 
-// Converts a raw project object from the backend (snake_case) into
-// the shape our UI expects (camelCase + derived display fields).
+// Converts raw project object from API into UI format
 const mapApiProject = (p: any): Project => ({
   id: p.id,
   title: p.title,
@@ -44,6 +38,10 @@ const mapApiProject = (p: any): Project => ({
 });
 
 export default function ProjectsPage() {
+  // User profile state
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
   // State for showing the detailed project specs modal window
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
 
@@ -53,27 +51,44 @@ export default function ProjectsPage() {
   const [newDetails, setNewDetails] = useState('');
   const [newEngine, setNewEngine] = useState<'ChatGPT-4o' | 'Gemini 1.5 Pro' | 'Claude 3.5 Sonnet'>('Claude 3.5 Sonnet');
 
-  // Real project data — now fetched from the backend/DB instead of hardcoded
+  // Real project data
   const [allProjects, setAllProjects] = useState<Project[]>([]);
 
-  // Fetch this user's projects from the database on page load
+  // Fetch user profile and projects on page load
   useEffect(() => {
-    const fetchProjects = async () => {
+    const fetchData = async () => {
       const token = localStorage.getItem("token");
+      setIsLoading(true);
+
       try {
-        const res = await fetch("http://localhost:8000/api/projects", {
+        // Fetch User Profile
+        const profileRes = await fetch("http://localhost:8000/api/profile", {
           headers: { Authorization: `Bearer ${token}` }
         });
-        const data = await res.json();
-        setAllProjects(data.map(mapApiProject));
+        if (profileRes.ok) {
+          const profileData = await profileRes.json();
+          setProfile(profileData);
+        }
+
+        // Fetch Projects
+        const projectsRes = await fetch("http://localhost:8000/api/projects", {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (projectsRes.ok) {
+          const projectsData = await projectsRes.json();
+          setAllProjects(projectsData.map(mapApiProject));
+        }
       } catch (err) {
-        console.error("Failed to fetch projects:", err);
+        console.error("Failed to fetch page data:", err);
+      } finally {
+        setIsLoading(false);
       }
     };
-    fetchProjects();
+
+    fetchData();
   }, []);
 
-  // Handler to provision a new project — now persists to the database via POST
+  // Handler to provision a new project
   const handleProvisionProject = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTitle.trim()) return;
@@ -98,7 +113,6 @@ export default function ProjectsPage() {
       console.error("Failed to create project:", err);
     }
 
-    // Reset structural tracking parameters back to default
     setNewTitle('');
     setNewDetails('');
     setNewEngine('Claude 3.5 Sonnet');
@@ -123,27 +137,28 @@ export default function ProjectsPage() {
                   <path fillRule="evenodd" d="M18.685 19.097A9.723 9.723 0 0021.75 12c0-5.385-4.365-9.75-9.75-9.75S2.25 6.615 2.25 12c0 2.654 1.057 5.063 2.769 6.843.048.05.084.111.104.177A11.966 11.966 0 0012 21c2.569 0 4.978-.813 6.953-2.195a.23.23 0 01.1-.114zM12 6.75a3.25 3.25 0 100 6.5 3.25 3.25 0 000-6.5z" clipRule="evenodd" />
                 </svg>
               </div>
-              <h3 className="text-white font-semibold text-base">John Doe</h3>
-              <p className="text-xs text-slate-500 mt-0.5">Aspiring Software Engineer</p>
+              <h3 className="text-white font-semibold text-base">
+                {isLoading ? 'Loading...' : profile?.email || 'No user session'}
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5 capitalize">{profile?.role || ''}</p>
             </div>
 
-            {/* Sidebar Navigation Paths */}
             <nav className="space-y-1">
               <Link href="/dashboard" className="flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-slate-800 hover:text-white text-slate-400 font-medium text-sm transition-colors">
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v4a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v4a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v4a2 2 0 01-2 2H6a2 2 0 01-2-2v-4zM14 16a2 2 0 012-2h2a2 2 0 012 2v4a2 2 0 01-2 2h-2a2 2 0 01-2-2v-4z" />
-                </svg>
                 Dashboard
               </Link>
               <Link href="/dashboard/projects" className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-slate-800 text-white font-medium text-sm transition-colors">
-                <svg className="w-5 h-5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-                </svg>
                 Projects
+              </Link>
+              <Link href="/dashboard/mock-interviews" className="flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-slate-800 hover:text-white text-slate-400 font-medium text-sm transition-colors">
+                Mock Interviews
+              </Link>
+              <Link href="/dashboard/profile" className="flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-slate-800 hover:text-white text-slate-400 font-medium text-sm transition-colors">
+                Profile
               </Link>
             </nav>
           </div>
-          
+
           <button className="w-full bg-rose-600 hover:bg-rose-700 text-white font-medium py-2 px-4 rounded-lg text-sm transition-colors">
             Log Out
           </button>
@@ -157,7 +172,6 @@ export default function ProjectsPage() {
               <p className="text-slate-500 text-sm mt-1">Deploy LLM-powered engine configurations or upgrade to live Human Specialist review.</p>
             </div>
             
-            {/* Quick Action Premium Hooks & New Project Trigger */}
             <div className="flex gap-2">
               <button 
                 type="button"
@@ -166,9 +180,6 @@ export default function ProjectsPage() {
               >
                 {isCreating ? '✕ Close Form' : '➕ Create New Project'}
               </button>
-              {/* "Ask Expert (Paid)" button — kept visible as a UI placeholder,
-                  but not wired to anything yet since the paid live-session
-                  feature isn't built. Revisit when that feature is scoped. */}
               <button className="bg-white border border-slate-200 text-slate-800 hover:bg-slate-50 text-xs font-semibold py-2.5 px-4 rounded-lg shadow-sm transition-colors flex items-center gap-1.5">
                 <span className="w-2 h-2 rounded-full bg-blue-500"></span> Ask Expert (Paid)
               </button>
@@ -253,7 +264,6 @@ export default function ProjectsPage() {
                   <h3 className="text-lg font-bold text-slate-900 mb-2">Project {project.id}: {project.title}</h3>
                   <p className="text-sm text-slate-500 line-clamp-2 leading-relaxed mb-4">{project.details}</p>
                   
-                  {/* METADATA TARGET API PIPELINES */}
                   <div className="space-y-1.5 mb-4 pt-3 border-t border-slate-100">
                     {project.aiEngine && (
                       <div className="flex items-center gap-2 text-xs">
@@ -263,27 +273,10 @@ export default function ProjectsPage() {
                         </span>
                       </div>
                     )}
-
-                    {/* Human Specialist row — commented out until the paid
-                        expert/live-session feature exists in the backend.
-                    {project.expertSession && (
-                      <div className="flex items-center gap-2 text-xs">
-                        <span className="text-slate-400 font-medium">Human Specialist:</span>
-                        <span className="bg-blue-50 text-blue-700 border border-blue-100 px-2 py-0.5 rounded font-medium">
-                          {project.expertSession.type} ({project.expertSession.status})
-                        </span>
-                        {project.expertSession.dateText && (
-                          <span className="text-slate-500 italic text-[11px] ml-1">
-                            {project.expertSession.dateText}
-                          </span>
-                        )}
-                      </div>
-                    )}
-                    */}
                   </div>
                 </div>
                 
-                {/* INTERACTIVE ACTIONS HUB */}
+                {/* ACTION BUTTONS */}
                 <div className="flex gap-2 pt-2 border-t border-slate-100">
                   <button 
                     type="button"
@@ -292,14 +285,18 @@ export default function ProjectsPage() {
                   >
                     View Specs
                   </button>
+
+                  <Link 
+                    href={`/dashboard/projects/${project.id}/study?name=${encodeURIComponent(project.title)}&topic=${encodeURIComponent(project.details)}`}
+                    className="flex-1 py-2 text-center text-xs font-semibold rounded-md bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 transition-colors block"
+                  >
+                    Study Page
+                  </Link>
                   
                   <Link 
-                    //href={`/dashboard/projects/${project.id}/workspace?name=${encodeURIComponent(project.title)}&topic=${encodeURIComponent(project.details)}&engine=${encodeURIComponent(project.aiEngine || 'Gemini 1.5 Pro')}`}
                     href={`/dashboard/projects/${project.id}/workspace?name=${encodeURIComponent(`Project ${project.id}: ${project.title}`)}&topic=${encodeURIComponent(project.details)}&engine=${encodeURIComponent(project.aiEngine || 'Gemini 1.5 Pro')}`}
                     className="flex-1 py-2 text-center text-xs font-semibold rounded-md bg-blue-600 hover:bg-blue-700 text-white shadow-sm transition-colors block"
                   >
-                    {/* Was previously conditional on expertSession?.type === "Video Mock Interview" -> "Join Video Call".
-                        Simplified to always show "Open Workspace" until that feature returns. */}
                     Open Workspace
                   </Link>
                 </div>
@@ -355,25 +352,6 @@ export default function ProjectsPage() {
                   </div>
                 </div>
               </div>
-
-              {/* Expert Verification Stream section — commented out until
-                  the paid expert/live-session feature is built.
-              <div className="p-4 rounded-lg border border-slate-100 bg-blue-50/40 space-y-2">
-                <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wide">Expert Verification Stream</h4>
-                {selectedProject.expertSession ? (
-                  <div className="text-xs space-y-1">
-                    <p><span className="font-semibold text-slate-700">Type:</span> {selectedProject.expertSession.type}</p>
-                    <p><span className="font-semibold text-slate-700">Billing Tiers:</span> Premium Verified ({selectedProject.expertSession.cost})</p>
-                    <p><span className="font-semibold text-slate-700">Pipeline Status:</span> <span className="font-medium text-blue-700">{selectedProject.expertSession.status}</span></p>
-                  </div>
-                ) : (
-                  <div className="flex justify-between items-center text-xs">
-                    <span className="text-slate-500 italic">No human expert attached to this track yet.</span>
-                    <button type="button" className="text-blue-600 font-bold hover:underline">Add Premium Review</button>
-                  </div>
-                )}
-              </div>
-              */}
             </div>
 
             <div className="mt-6 flex justify-end gap-2">
