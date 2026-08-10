@@ -21,15 +21,9 @@ interface StudyDocument {
   name: string;
   pages: number;
   content: string;
-   // NEW: fallback images for pages that had unreliable text extraction —
-  // returned by the backend alongside content.
   page_images?: { page: number; image_base64: string }[];
 }
 
-
-// === FIX 2: saved summaries/flashcards persistence ===
-// Shape returned by GET /study/saved-items — one saved summarize/explain/
-// questions result from the DB.
 interface SavedItem {
   id: number;
   document_name?: string;
@@ -51,8 +45,6 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
   const projectName = searchParams.get('name') || `Project Track #${projectId}`;
   const incomingEngine = searchParams.get('engine') || 'Claude';
 
-
-
   const initialAISelection = incomingEngine.includes('Gemini')
     ? 'Gemini'
     : incomingEngine.includes('ChatGPT')
@@ -61,25 +53,13 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
 
   // --- WORKSPACE STATES ---
   const [selectedAI, setSelectedAI] = useState<'ChatGPT' | 'Gemini' | 'Claude'>(initialAISelection);
-  const [activeTab, setActiveTab] = useState<'ai-chat' | 'expert-qa' | 'notes'>('ai-chat');
+  const [activeTab, setActiveTab] = useState<'ai-chat' | 'notes'>('ai-chat');
 
-  // CHANGED: Document list now starts EMPTY instead of seeded with 2 fake PDFs.
-  // Real documents will only appear once the user uploads one (or once we wire up
-  // fetching saved documents from Neon in the next step).
   const [documents, setDocuments] = useState<StudyDocument[]>([]);
-
-  // CHANGED: activeDocument can now be null (no document selected yet), instead of
-  // being force-set to documents[0] which crashed/faked data when the list was empty.
   const [activeDocument, setActiveDocument] = useState<StudyDocument | null>(null);
 
   const [selectionMode, setSelectionMode] = useState<SelectionMode>('text');
-
-  // CHANGED: No longer pre-seeded with the fake "Index-based lookup..." sentence.
-  // Highlights now only appear once the user actually selects/crops real text.
   const [highlights, setHighlights] = useState<string[]>([]);
-
-  // CHANGED: No longer pre-filled with fake snippet text — starts blank until
-  // the user selects or crops something themselves.
   const [activeSnippet, setActiveSnippet] = useState<string>('');
 
   // Crop Region States
@@ -102,7 +82,7 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // === FIX 2: saved summaries/flashcards persistence ===
+  // Saved Items Persistence State
   const [savedItems, setSavedItems] = useState<SavedItem[]>([]);
   const [isLoadingSavedItems, setIsLoadingSavedItems] = useState(false);
 
@@ -122,82 +102,64 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
     ]);
   }, [projectName, selectedAI]);
 
+  useEffect(() => {
+    const loadSavedItems = async () => {
+      setIsLoadingSavedItems(true);
+      try {
+        const res = await fetch(`http://localhost:8000/api/projects/${projectId}/study/saved-items`);
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          setSavedItems(data);
+        }
+      } catch (err) {
+        console.error("Failed to load saved study items:", err);
+      } finally {
+        setIsLoadingSavedItems(false);
+      }
+    };
+    loadSavedItems();
+  }, [projectId]);
 
-  // === FIX 2: saved summaries/flashcards persistence ===
-// Loads previously saved summarize/explain/questions results from the DB
-// as soon as the Study page opens. This is what makes the Notes tab
-// survive a refresh or a logout -> login: it's reading from the server,
-// not from local component state that resets on unmount.
-useEffect(() => {
-  const loadSavedItems = async () => {
-    setIsLoadingSavedItems(true);
+  // --- HANDLER: UPLOAD DOCUMENT ---
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append("file", file);
+
     try {
-      const res = await fetch(`http://localhost:8000/api/projects/${projectId}/study/saved-items`);
-      const data = await res.json();
-      if (Array.isArray(data)) {
-        setSavedItems(data);
+      const response = await fetch(
+        `http://localhost:8000/api/projects/${projectId}/study/upload-document`,
+        {
+          method: "POST",
+          body: formData,
+        }
+      );
+
+      const data = await response.json();
+
+      if (data.success) {
+        const newDoc: StudyDocument = {
+          id: data.document.id,
+          name: data.document.name,
+          pages: data.document.pages,
+          content: data.document.content,
+          page_images: data.document.page_images || []
+        };
+        setDocuments(prev => [newDoc, ...prev]);
+        setActiveDocument(newDoc);
+      } else {
+        console.error("Upload failed:", data.error);
+        alert(`Upload failed: ${data.error || "Unknown error"}`);
       }
-    } catch (err) {
-      console.error("Failed to load saved study items:", err);
-    } finally {
-      setIsLoadingSavedItems(false);
+    } catch (err: any) {
+      console.error("Upload error:", err);
+      alert(`Upload error: ${err.message || "Failed to reach backend server."}`);
     }
+
+    e.target.value = '';
   };
-  loadSavedItems();
-}, [projectId]);
-
-// --- HANDLER: UPLOAD DOCUMENT ---
-// CHANGED: no longer reads the raw file locally with FileReader.readAsText().
-// That was dumping raw PDF binary bytes (%PDF-1.5, stream, endobj...) straight
-// into the viewer, which is the garbage text you were seeing.
-// Now this POSTs the actual file to the FastAPI backend, which uses pdfplumber
-// to properly extract clean text server-side, then we use THAT response
-// to populate the document — not the raw file.
-const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-
-  // Build multipart form data — matches FastAPI's `file: UploadFile = File(...)` param
-  const formData = new FormData();
-  formData.append("file", file);
-
-  try {
-    const response = await fetch(
-      `http://localhost:8000/api/projects/${projectId}/study/upload-document`,
-      {
-        method: "POST",
-        body: formData,
-        // NOTE: do NOT manually set Content-Type here — the browser sets the
-        // correct multipart/form-data boundary automatically when using FormData.
-      }
-    );
-
-    const data = await response.json();
-
-    if (data.success) {
-      // Use the backend's cleanly-extracted content, id, and page count —
-      // not anything read locally from the raw file.
-      const newDoc: StudyDocument = {
-        id: data.document.id,
-        name: data.document.name,
-        pages: data.document.pages,
-        content: data.document.content,
-        // NEW: carry the page-image fallbacks through to the viewer
-        page_images: data.document.page_images || []
-      };
-      setDocuments(prev => [newDoc, ...prev]);
-      setActiveDocument(newDoc);
-    } else {
-      console.error("Upload failed:", data.error);
-      alert(`Upload failed: ${data.error || "Unknown error"}`);
-    }
-  } catch (err: any) {
-    console.error("Upload error:", err);
-    alert(`Upload error: ${err.message || "Failed to reach backend server."}`);
-  }
-
-  e.target.value = '';
-};
 
   // --- HANDLER: TEXT HIGHLIGHT CAPTURE ---
   const handleTextSelection = () => {
@@ -313,11 +275,7 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
       return part;
     });
   };
-  
 
- // NEW: splits content on the [[PAGE_IMAGE:N]] marker tokens the backend
-  // inserts for unreliable-text pages, and renders an actual <img> in place
-  // of each token instead of ever showing raw garbled (cid:N) text.
   const renderContentWithImages = (content: string, pageImages: { page: number; image_base64: string }[] = []) => {
     const parts = content.split(/\[\[PAGE_IMAGE:(\d+)\]\]/g);
     return parts.map((part, idx) => {
@@ -343,10 +301,8 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     });
   };
 
-
   // --- HANDLER: RUN AI ACTION ON CAPTURED SNIPPET ---
   const handleRunAiAction = async (action: AIAction) => {
-    // CHANGED: guard against activeDocument being null now that there's no default doc.
     if (!activeSnippet.trim() || isProcessingAction || !activeDocument) return;
 
     setActiveAction(action);
@@ -371,12 +327,6 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
       if (data.success) {
         setAiOutput(data.result);
 
-                // === FIX 2: saved summaries/flashcards persistence ===
-        // Push this result straight into the saved list so it shows up in
-        // "Saved Summaries & Flashcards" immediately — it's already
-        // persisted server-side (process-snippet just saved it and handed
-        // back its id/created_at), this just keeps the UI in sync without
-        // a full refetch.
         setSavedItems(prev => [{
           id: data.action_id,
           document_name: activeDocument.name,
@@ -391,9 +341,6 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         throw new Error(data.error || "Failed to process snippet.");
       }
     } catch (err: any) {
-      // CHANGED: removed the three canned fake outputs (summarize/explain/questions)
-      // that used to silently pretend the AI call succeeded. Now a failed call shows
-      // a real error to the user instead of misleading fabricated text.
       console.error(err);
       setAiOutput(`⚠️ Error: ${err.message || "Failed to process snippet. Please try again."}`);
     } finally {
@@ -421,8 +368,6 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
           message: userText,
           code_context: activeSnippet,
           question_metadata: {
-            // CHANGED: activeDocument can be null now, so this no longer assumes
-            // a document is always selected.
             title: `Document Context: ${activeDocument ? activeDocument.name : 'No document selected'}`,
             difficulty: 'Medium'
           }
@@ -516,8 +461,6 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
           <div className="flex items-center justify-between mb-4 bg-slate-950 p-2.5 rounded-xl border border-slate-800">
             <div className="flex items-center gap-2">
               <span className="text-xs text-slate-400 font-medium pl-1">Document:</span>
-              {/* CHANGED: dropdown only renders once there's at least one real document.
-                  Previously this assumed documents[0] always existed. */}
               {documents.length > 0 ? (
                 <select
                   value={activeDocument?.id}
@@ -596,10 +539,6 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
               />
             )}
 
-            {/* CHANGED: this whole block is now conditional on activeDocument existing.
-                Previously it assumed activeDocument was always set (from the fake seed data)
-                and also included a hardcoded "Click to Capture Snippet" demo box with a
-                fake sentence baked into its onClick — that box has been deleted entirely. */}
             {activeDocument ? (
               <>
                 <div className="flex items-center justify-between pb-3 mb-4 border-b border-slate-900 text-xs text-slate-500">
@@ -607,14 +546,13 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
                   <span className="capitalize">Mode: {selectionMode} Selection</span>
                 </div>
 
-               <div className="space-y-4 text-xs sm:text-sm text-slate-300 leading-relaxed font-sans">
+                <div className="space-y-4 text-xs sm:text-sm text-slate-300 leading-relaxed font-sans">
                   <div className="whitespace-pre-wrap">
                     {renderContentWithImages(activeDocument.content, activeDocument.page_images)}
                   </div>
                 </div>
               </>
             ) : (
-              // CHANGED: new empty-state placeholder shown until a real document is uploaded.
               <div className="flex flex-col items-center justify-center h-full text-center text-slate-500 text-xs gap-2">
                 <p>No document uploaded yet.</p>
                 <p>Click "+ Upload PDF" above to get started.</p>
@@ -778,14 +716,13 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
                       type="text"
                       value={chatInput}
                       onChange={(e) => setChatInput(e.target.value)}
-                      disabled={isAiTyping || isProcessingAction}
-                      placeholder={`Ask ${selectedAI} follow-up questions...`}
-                      className="flex-1 bg-slate-950 text-slate-200 text-xs sm:text-sm rounded-lg px-4 border border-slate-800 focus:outline-none focus:border-blue-500/50 disabled:opacity-50"
+                      placeholder={`Ask ${selectedAI} about this document...`}
+                      className="flex-1 bg-slate-950 border border-slate-800 text-xs text-slate-200 rounded-lg px-3 py-2.5 focus:outline-none focus:border-blue-500/50 placeholder:text-slate-600"
                     />
                     <button
                       type="submit"
-                      disabled={isAiTyping || isProcessingAction}
-                      className="bg-blue-600 hover:bg-blue-700 disabled:bg-blue-800/40 text-white font-semibold text-xs px-4 py-2.5 rounded-lg transition-colors"
+                      disabled={isAiTyping || !chatInput.trim()}
+                      className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-semibold px-4 py-2.5 rounded-lg transition-colors"
                     >
                       Send
                     </button>
@@ -795,41 +732,41 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
               </div>
             )}
 
-                       {activeTab === 'notes' && (
-              // === FIX 2: saved summaries/flashcards persistence ===
-              // Real, DB-backed list of every summarize/explain/questions
-              // result saved for this project — loaded via GET
-              // /study/saved-items on mount, kept in sync locally whenever
-              // a new action runs successfully.
-              <div className="space-y-3">
-                <h3 className="font-bold text-white text-sm mb-1">Saved Key Concepts</h3>
-
-                {isLoadingSavedItems && (
-                  <p className="text-xs text-slate-500">Loading saved items…</p>
-                )}
-
-                {!isLoadingSavedItems && savedItems.length === 0 && (
-                  <p className="text-xs text-slate-500">
-                    Nothing saved yet — run Summarize, Explain Concept, or Generate Questions
-                    on a selection and it'll show up here permanently, even after a refresh
-                    or logging back in.
-                  </p>
-                )}
-
-                {savedItems.map(item => (
-                  <div key={item.id} className="p-4 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-300">
-                    <div className="flex items-center justify-between mb-2 gap-2">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">
-                        {item.action_type} · {item.engine}
-                      </span>
-                      <span className="text-[10px] text-slate-500 text-right">
-                        {item.document_name} · {new Date(item.created_at).toLocaleString()}
-                      </span>
-                    </div>
-                    <p className="text-slate-500 italic mb-2">"{item.snippet_text}"</p>
-                    <p className="whitespace-pre-wrap leading-relaxed">{item.ai_reply}</p>
+            {activeTab === 'notes' && (
+              <div className="space-y-4 overflow-y-auto flex-1">
+                <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                  Saved Summaries & Flashcards
+                </h2>
+                {isLoadingSavedItems ? (
+                  <div className="flex items-center gap-2 text-xs text-slate-400 py-4">
+                    <span className="w-3.5 h-3.5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></span>
+                    <span>Loading saved items...</span>
                   </div>
-                ))}
+                ) : savedItems.length === 0 ? (
+                  <div className="text-xs text-slate-500 italic py-4">
+                    No saved items found. Select text and click an AI action to save notes.
+                  </div>
+                ) : (
+                  savedItems.map((item) => (
+                    <div key={item.id} className="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-2">
+                      <div className="flex items-center justify-between text-[10px] text-slate-400">
+                        <span className="uppercase font-bold text-blue-400">
+                          {item.action_type} ({item.engine})
+                        </span>
+                        <span>{new Date(item.created_at).toLocaleDateString()}</span>
+                      </div>
+                      {item.document_name && (
+                        <div className="text-[10px] text-slate-500">Document: {item.document_name}</div>
+                      )}
+                      <p className="text-xs text-slate-300 italic font-mono bg-slate-900/80 p-2 rounded border border-slate-800/80">
+                        "{item.snippet_text}"
+                      </p>
+                      <p className="text-xs text-slate-300 whitespace-pre-wrap leading-relaxed pt-1">
+                        {item.ai_reply}
+                      </p>
+                    </div>
+                  ))
+                )}
               </div>
             )}
           </div>

@@ -54,7 +54,7 @@ const handleLogin = async (e: React.SyntheticEvent<HTMLFormElement>) => {
 
         // Send them to their dedicated live dashboards safely
         if (trueRole === "expert") {
-          router.push("/expert-dashboard");
+          router.push("/expert/dashboard");
         } else {
           router.push("/dashboard"); // or /student-dashboard depending on your naming convention
         }

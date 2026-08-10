@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 
 interface UserProfile {
   id: number;
@@ -27,6 +28,7 @@ const getStatusColor = (status: string) => {
 };
 
 export default function DashboardPage() {
+  const router = useRouter();
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
 
@@ -43,6 +45,12 @@ export default function DashboardPage() {
     "Content-Type": "application/json",
     Authorization: `Bearer ${localStorage.getItem("token")}`
   });
+
+  // --- Log Out Handler ---
+  const handleLogout = () => {
+    localStorage.removeItem("token");
+    router.replace("/login");
+  };
 
   // Fetch profile + projects on load
   useEffect(() => {
@@ -113,7 +121,7 @@ export default function DashboardPage() {
     setNewSkillInput('');
   };
 
- const removeSkill = (index: number) => {
+  const removeSkill = (index: number) => {
     if (!profile) return;
     const updatedStack = (profile.tech_stack || []).filter((_, i) => i !== index);
     saveTechStack(updatedStack);
@@ -174,7 +182,10 @@ export default function DashboardPage() {
           </div>
 
           {/* Log Out Button */}
-          <button className="w-full bg-rose-600 hover:bg-rose-700 text-white font-medium py-2 px-4 rounded-lg text-sm transition-colors focus:outline-none">
+          <button 
+            onClick={handleLogout}
+            className="w-full bg-rose-600 hover:bg-rose-700 text-white font-medium py-2 px-4 rounded-lg text-sm transition-colors focus:outline-none"
+          >
             Log Out
           </button>
         </aside>
