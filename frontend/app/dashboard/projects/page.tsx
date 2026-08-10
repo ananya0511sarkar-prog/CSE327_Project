@@ -2,13 +2,9 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 
 // ─── TYPES ────────────────────────────────────────────────────────
-interface UserProfile {
-  email?: string;
-  role?: string;
-}
-
 interface Project {
   id: number;
   title: string;
@@ -19,14 +15,12 @@ interface Project {
   aiEngine?: 'ChatGPT-4o' | 'Gemini 1.5 Pro' | 'Claude 3.5 Sonnet';
 }
 
-// Maps status -> Tailwind badge classes
 const getBadgeColor = (status: string) => {
   if (status === "Complete") return "text-emerald-600 bg-emerald-50 border-emerald-200";
   if (status === "Action Required") return "text-blue-600 bg-blue-50 border-blue-200";
-  return "text-amber-600 bg-amber-50 border-amber-200"; // In Progress / default
+  return "text-amber-600 bg-amber-50 border-amber-200";
 };
 
-// Converts raw project object from API into UI format
 const mapApiProject = (p: any): Project => ({
   id: p.id,
   title: p.title,
@@ -38,57 +32,33 @@ const mapApiProject = (p: any): Project => ({
 });
 
 export default function ProjectsPage() {
-  // User profile state
-  const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const router = useRouter();
 
-  // State for showing the detailed project specs modal window
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
 
-  // Form states for creating a new project track inline
   const [isCreating, setIsCreating] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newDetails, setNewDetails] = useState('');
   const [newEngine, setNewEngine] = useState<'ChatGPT-4o' | 'Gemini 1.5 Pro' | 'Claude 3.5 Sonnet'>('Claude 3.5 Sonnet');
 
-  // Real project data
   const [allProjects, setAllProjects] = useState<Project[]>([]);
 
-  // Fetch user profile and projects on page load
   useEffect(() => {
-    const fetchData = async () => {
+    const fetchProjects = async () => {
       const token = localStorage.getItem("token");
-      setIsLoading(true);
-
       try {
-        // Fetch User Profile
-        const profileRes = await fetch("http://localhost:8000/api/profile", {
+        const res = await fetch("http://localhost:8000/api/projects", {
           headers: { Authorization: `Bearer ${token}` }
         });
-        if (profileRes.ok) {
-          const profileData = await profileRes.json();
-          setProfile(profileData);
-        }
-
-        // Fetch Projects
-        const projectsRes = await fetch("http://localhost:8000/api/projects", {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        if (projectsRes.ok) {
-          const projectsData = await projectsRes.json();
-          setAllProjects(projectsData.map(mapApiProject));
-        }
+        const data = await res.json();
+        setAllProjects(data.map(mapApiProject));
       } catch (err) {
-        console.error("Failed to fetch page data:", err);
-      } finally {
-        setIsLoading(false);
+        console.error("Failed to fetch projects:", err);
       }
     };
-
-    fetchData();
+    fetchProjects();
   }, []);
 
-  // Handler to provision a new project
   const handleProvisionProject = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTitle.trim()) return;
@@ -119,47 +89,104 @@ export default function ProjectsPage() {
     setIsCreating(false);
   };
 
+  const handleLogout = () => {
+    localStorage.removeItem("token");
+    router.push("/login");
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans relative">
       <div className="flex flex-1">
         
-        {/* LEFT NAVIGATION SIDEBAR */}
-        <aside className="w-64 bg-slate-900 text-slate-300 flex flex-col justify-between p-4 shrink-0">
+        {/* ─── LEFT NAVIGATION SIDEBAR (MATCHES SCREENSHOT) ─── */}
+        <aside className="w-64 bg-[#0a0f1d] text-slate-300 flex flex-col justify-between p-5 shrink-0 border-r border-slate-800/40">
           <div>
-            <div className="flex items-center gap-2 px-2 py-4 text-white text-xl font-bold tracking-tight">
-              <span className="text-blue-500 text-2xl font-black">X</span> InterviewX
+            {/* Header Logo */}
+            <div className="flex items-center gap-2 px-2 py-4 text-white text-2xl font-bold tracking-tight">
+              <span className="text-blue-500 font-black">X</span> 
+              <span className="font-serif tracking-normal text-white">InterviewX</span>
             </div>
             
             {/* User Account Capsule */}
-            <div className="flex flex-col items-center text-center my-6 border-b border-slate-800 pb-6">
-              <div className="w-20 h-20 bg-slate-700 rounded-full flex items-center justify-center text-slate-400 mb-3 overflow-hidden border-2 border-slate-600">
-                <svg className="w-12 h-12" fill="currentColor" viewBox="0 0 24 24">
-                  <path fillRule="evenodd" d="M18.685 19.097A9.723 9.723 0 0021.75 12c0-5.385-4.365-9.75-9.75-9.75S2.25 6.615 2.25 12c0 2.654 1.057 5.063 2.769 6.843.048.05.084.111.104.177A11.966 11.966 0 0012 21c2.569 0 4.978-.813 6.953-2.195a.23.23 0 01.1-.114zM12 6.75a3.25 3.25 0 100 6.5 3.25 3.25 0 000-6.5z" clipRule="evenodd" />
-                </svg>
+            <div className="flex flex-col items-center text-center my-6 px-2">
+              <div className="w-20 h-20 bg-slate-800/60 rounded-full flex items-center justify-center text-slate-400 mb-3 border border-slate-700/40">
+                <div className="w-10 h-10 rounded-full border-[3px] border-slate-400/70 flex items-center justify-center">
+                  <div className="w-3.5 h-3.5 rounded-full bg-slate-400"></div>
+                </div>
               </div>
-              <h3 className="text-white font-semibold text-base">
-                {isLoading ? 'Loading...' : profile?.email || 'No user session'}
+              <h3 className="text-white font-bold text-sm tracking-wide break-all">
+                rahul.dey.232@northsouth.edu
               </h3>
-              <p className="text-xs text-slate-500 mt-0.5 capitalize">{profile?.role || ''}</p>
+              <p className="text-xs text-slate-400 mt-1 font-normal">Student</p>
             </div>
 
-            <nav className="space-y-1">
-              <Link href="/dashboard" className="flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-slate-800 hover:text-white text-slate-400 font-medium text-sm transition-colors">
+            <div className="border-t border-slate-800/80 my-5"></div>
+
+            {/* Sidebar Navigation Links */}
+            <nav className="space-y-1.5">
+              {/* Dashboard */}
+              <Link 
+                href="/dashboard" 
+                className="flex items-center gap-3.5 px-4 py-3 rounded-xl text-slate-300 hover:text-white hover:bg-slate-800/40 font-medium text-sm transition-colors"
+              >
+                <svg className="w-5 h-5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v4a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v4a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v4a2 2 0 01-2 2H6a2 2 0 01-2-2v-4zM14 16a2 2 0 012-2h2a2 2 0 012 2v4a2 2 0 01-2 2h-2a2 2 0 01-2-2v-4z" />
+                </svg>
                 Dashboard
               </Link>
-              <Link href="/dashboard/projects" className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-slate-800 text-white font-medium text-sm transition-colors">
+
+              {/* Projects (Active Page) */}
+              <Link 
+                href="/dashboard/projects" 
+                className="flex items-center gap-3.5 px-4 py-3 rounded-xl bg-[#162032] text-white font-semibold text-sm transition-colors border border-slate-700/50 shadow-inner"
+              >
+                <svg className="w-5 h-5 text-slate-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                </svg>
                 Projects
               </Link>
-              <Link href="/dashboard/mock-interviews" className="flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-slate-800 hover:text-white text-slate-400 font-medium text-sm transition-colors">
+
+              {/* Mock Interviews */}
+              <Link 
+                href="/dashboard/mock-interviews" 
+                className="flex items-center gap-3.5 px-4 py-3 rounded-xl text-slate-300 hover:text-white hover:bg-slate-800/40 font-medium text-sm transition-colors"
+              >
+                <svg className="w-5 h-5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                </svg>
                 Mock Interviews
               </Link>
-              <Link href="/dashboard/profile" className="flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-slate-800 hover:text-white text-slate-400 font-medium text-sm transition-colors">
+
+              {/* Resources */}
+              <Link 
+                href="/dashboard/resources" 
+                className="flex items-center gap-3.5 px-4 py-3 rounded-xl text-slate-300 hover:text-white hover:bg-slate-800/40 font-medium text-sm transition-colors"
+              >
+                <svg className="w-5 h-5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                </svg>
+                Resources
+              </Link>
+
+              {/* Profile */}
+              <Link 
+                href="/dashboard/profile" 
+                className="flex items-center gap-3.5 px-4 py-3 rounded-xl text-slate-300 hover:text-white hover:bg-slate-800/40 font-medium text-sm transition-colors"
+              >
+                <div className="w-6 h-6 rounded-full bg-black flex items-center justify-center text-white text-xs font-bold border border-slate-700">
+                  N
+                </div>
                 Profile
               </Link>
             </nav>
           </div>
-
-          <button className="w-full bg-rose-600 hover:bg-rose-700 text-white font-medium py-2 px-4 rounded-lg text-sm transition-colors">
+          
+          {/* Active Logout Button */}
+          <button 
+            type="button"
+            onClick={handleLogout}
+            className="w-full bg-[#e11d48] hover:bg-rose-600 text-white font-bold py-2.5 px-4 rounded-xl text-xs transition-colors shadow-sm mt-6"
+          >
             Log Out
           </button>
         </aside>
@@ -276,7 +303,7 @@ export default function ProjectsPage() {
                   </div>
                 </div>
                 
-                {/* ACTION BUTTONS */}
+                {/* INTERACTIVE ACTIONS HUB */}
                 <div className="flex gap-2 pt-2 border-t border-slate-100">
                   <button 
                     type="button"
@@ -285,19 +312,19 @@ export default function ProjectsPage() {
                   >
                     View Specs
                   </button>
-
-                  <Link 
-                    href={`/dashboard/projects/${project.id}/study?name=${encodeURIComponent(project.title)}&topic=${encodeURIComponent(project.details)}`}
-                    className="flex-1 py-2 text-center text-xs font-semibold rounded-md bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 transition-colors block"
-                  >
-                    Study Page
-                  </Link>
                   
                   <Link 
                     href={`/dashboard/projects/${project.id}/workspace?name=${encodeURIComponent(`Project ${project.id}: ${project.title}`)}&topic=${encodeURIComponent(project.details)}&engine=${encodeURIComponent(project.aiEngine || 'Gemini 1.5 Pro')}`}
                     className="flex-1 py-2 text-center text-xs font-semibold rounded-md bg-blue-600 hover:bg-blue-700 text-white shadow-sm transition-colors block"
                   >
                     Open Workspace
+                  </Link>
+
+                  <Link 
+                    href={`/dashboard/projects/${project.id}/study?name=${encodeURIComponent(`Project ${project.id}: ${project.title}`)}&engine=${encodeURIComponent(project.aiEngine || 'Gemini 1.5 Pro')}`}
+                    className="flex-1 py-2 text-center text-xs font-semibold rounded-md bg-purple-600 hover:bg-purple-700 text-white shadow-sm transition-colors block"
+                  >
+                    Study Page
                   </Link>
                 </div>
               </div>
