@@ -18,26 +18,44 @@ interface Message {
 
 interface StudyDocument {
   id: number;
+  lesson_id: string;
   name: string;
   pages: number;
   content: string;
-   // NEW: fallback images for pages that had unreliable text extraction —
-  // returned by the backend alongside content.
   page_images?: { page: number; image_base64: string }[];
 }
 
-
-// === FIX 2: saved summaries/flashcards persistence ===
-// Shape returned by GET /study/saved-items — one saved summarize/explain/
-// questions result from the DB.
 interface SavedItem {
   id: number;
+  lesson_id?: string;
   document_name?: string;
   action_type: string;
   engine: string;
   snippet_text: string;
   ai_reply: string;
   created_at: string;
+}
+
+interface LessonEntry {
+  id: string;
+  title: string;
+  type: 'summary' | 'explanation' | 'practice_qa' | 'manual_section';
+  snippet?: string;
+  content: string;
+  image_url?: string;
+  style?: {
+    isBold?: boolean;
+    isItalic?: boolean;
+    fontSize?: 'small' | 'normal' | 'large' | 'heading';
+  };
+  createdAt: string;
+}
+
+interface Lesson {
+  id: string;
+  title: string;
+  description: string;
+  entries: LessonEntry[];
 }
 
 type SelectionMode = 'text' | 'crop';
@@ -51,8 +69,6 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
   const projectName = searchParams.get('name') || `Project Track #${projectId}`;
   const incomingEngine = searchParams.get('engine') || 'Claude';
 
-
-
   const initialAISelection = incomingEngine.includes('Gemini')
     ? 'Gemini'
     : incomingEngine.includes('ChatGPT')
@@ -61,30 +77,44 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
 
   // --- WORKSPACE STATES ---
   const [selectedAI, setSelectedAI] = useState<'ChatGPT' | 'Gemini' | 'Claude'>(initialAISelection);
-  const [activeTab, setActiveTab] = useState<'ai-chat' | 'expert-qa' | 'notes'>('ai-chat');
+  const [activeTab, setActiveTab] = useState<'ai-chat' | 'notes' | 'lessons'>('lessons');
 
-  // CHANGED: Document list now starts EMPTY instead of seeded with 2 fake PDFs.
-  // Real documents will only appear once the user uploads one (or once we wire up
-  // fetching saved documents from Neon in the next step).
+  // --- LESSON STATES ---
+  const [lessons, setLessons] = useState<Lesson[]>([
+    {
+      id: 'lesson-cnn',
+      title: 'CNN',
+      description: 'Convolutional Neural Networks notes & practice',
+      entries: []
+    }
+  ]);
+  const [selectedLessonId, setSelectedLessonId] = useState<string>('lesson-cnn');
+  const [newLessonTitle, setNewLessonTitle] = useState<string>('');
+
+  // --- MANUAL SECTION FORM STATES ---
+  const [showAddSectionModal, setShowAddSectionModal] = useState<boolean>(false);
+  const [customSectionTitle, setCustomSectionTitle] = useState<string>('');
+  const [customSectionContent, setCustomSectionContent] = useState<string>('');
+  const [customSectionBold, setCustomSectionBold] = useState<boolean>(false);
+  const [customSectionItalic, setCustomSectionItalic] = useState<boolean>(false);
+  const [customSectionFontSize, setCustomSectionFontSize] = useState<'small' | 'normal' | 'large' | 'heading'>('normal');
+  const [customSectionImageUrl, setCustomSectionImageUrl] = useState<string>('');
+
+  // --- DOCUMENT STATES (BOUND TO LESSONS) ---
   const [documents, setDocuments] = useState<StudyDocument[]>([]);
-
-  // CHANGED: activeDocument can now be null (no document selected yet), instead of
-  // being force-set to documents[0] which crashed/faked data when the list was empty.
   const [activeDocument, setActiveDocument] = useState<StudyDocument | null>(null);
 
   const [selectionMode, setSelectionMode] = useState<SelectionMode>('text');
-
-  // CHANGED: No longer pre-seeded with the fake "Index-based lookup..." sentence.
-  // Highlights now only appear once the user actually selects/crops real text.
   const [highlights, setHighlights] = useState<string[]>([]);
-
-  // CHANGED: No longer pre-filled with fake snippet text — starts blank until
-  // the user selects or crops something themselves.
   const [activeSnippet, setActiveSnippet] = useState<string>('');
 
-  // Crop Region States
+  // Crop & Viewer Refs
   const viewerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const sectionImageInputRef = useRef<HTMLInputElement>(null);
+  const lessonPdfExportRef = useRef<HTMLDivElement>(null);
+  const snippetsPdfExportRef = useRef<HTMLDivElement>(null);
+
   const [isCropping, setIsCropping] = useState(false);
   const [cropBox, setCropBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const [startPos, setStartPos] = useState<{ x: number; y: number } | null>(null);
@@ -102,9 +132,23 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // === FIX 2: saved summaries/flashcards persistence ===
+  // Saved Items Persistence State
   const [savedItems, setSavedItems] = useState<SavedItem[]>([]);
   const [isLoadingSavedItems, setIsLoadingSavedItems] = useState(false);
+  const [isExportingPdf, setIsExportingPdf] = useState<boolean>(false);
+
+  const activeLesson = lessons.find(l => l.id === selectedLessonId);
+  const lessonDocuments = documents.filter(doc => doc.lesson_id === selectedLessonId);
+
+  useEffect(() => {
+    if (lessonDocuments.length > 0) {
+      if (!activeDocument || activeDocument.lesson_id !== selectedLessonId) {
+        setActiveDocument(lessonDocuments[0]);
+      }
+    } else {
+      setActiveDocument(null);
+    }
+  }, [selectedLessonId, documents]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -116,88 +160,194 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
         id: 'welcome',
         sender: 'ai',
         aiUsed: selectedAI,
-        text: `Welcome to the Study Interface for "${projectName}". Upload a document on the left, then select or crop text and use the AI actions on the right to summarize, explain, or generate quizzes.`,
+        text: `Welcome to the Study Workspace for "${projectName}". Upload lesson-specific documents on the left, then capture text/crop regions to generate summaries and practice questions.`,
         timestamp: new Date()
       }
     ]);
   }, [projectName, selectedAI]);
 
-
-  // === FIX 2: saved summaries/flashcards persistence ===
-// Loads previously saved summarize/explain/questions results from the DB
-// as soon as the Study page opens. This is what makes the Notes tab
-// survive a refresh or a logout -> login: it's reading from the server,
-// not from local component state that resets on unmount.
-useEffect(() => {
-  const loadSavedItems = async () => {
-    setIsLoadingSavedItems(true);
-    try {
-      const res = await fetch(`http://localhost:8000/api/projects/${projectId}/study/saved-items`);
-      const data = await res.json();
-      if (Array.isArray(data)) {
-        setSavedItems(data);
+  useEffect(() => {
+    const loadSavedItems = async () => {
+      setIsLoadingSavedItems(true);
+      try {
+        const res = await fetch(`http://localhost:8000/api/projects/${projectId}/study/saved-items`);
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          setSavedItems(data);
+        }
+      } catch (err) {
+        console.error("Failed to load saved study items:", err);
+      } finally {
+        setIsLoadingSavedItems(false);
       }
+    };
+    loadSavedItems();
+  }, [projectId]);
+
+  // --- HANDLER: CREATE NEW LESSON ---
+  const handleCreateLesson = () => {
+    if (!newLessonTitle.trim()) return;
+    const newLesson: Lesson = {
+      id: `lesson-${Date.now()}`,
+      title: newLessonTitle.trim(),
+      description: `Created on ${new Date().toLocaleDateString()}`,
+      entries: []
+    };
+    setLessons(prev => [...prev, newLesson]);
+    setSelectedLessonId(newLesson.id);
+    setNewLessonTitle('');
+  };
+
+  // --- HANDLER: ADD CUSTOM MANUAL SECTION ---
+  const handleAddManualSection = () => {
+    if (!customSectionTitle.trim() || !customSectionContent.trim() || !selectedLessonId) {
+      alert("Please enter a title and content for your section.");
+      return;
+    }
+
+    const newEntry: LessonEntry = {
+      id: `manual-${Date.now()}`,
+      title: customSectionTitle.trim(),
+      type: 'manual_section',
+      content: customSectionContent.trim(),
+      image_url: customSectionImageUrl || undefined,
+      style: {
+        isBold: customSectionBold,
+        isItalic: customSectionItalic,
+        fontSize: customSectionFontSize
+      },
+      createdAt: new Date().toLocaleString()
+    };
+
+    setLessons(prev => prev.map(lesson => {
+      if (lesson.id === selectedLessonId) {
+        return { ...lesson, entries: [...lesson.entries, newEntry] };
+      }
+      return lesson;
+    }));
+
+    // Reset Modal Form
+    setCustomSectionTitle('');
+    setCustomSectionContent('');
+    setCustomSectionBold(false);
+    setCustomSectionItalic(false);
+    setCustomSectionFontSize('normal');
+    setCustomSectionImageUrl('');
+    setShowAddSectionModal(false);
+  };
+
+  // --- HANDLER: SECTION IMAGE FILE ATTACH ---
+  const handleSectionImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      if (event.target?.result) {
+        setCustomSectionImageUrl(event.target.result as string);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // --- HANDLER: UPLOAD PDF UNDER CURRENT LESSON ---
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!selectedLessonId) {
+      alert("Please select or create a lesson first before uploading a document.");
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("lesson_id", selectedLessonId);
+
+    try {
+      const response = await fetch(
+        `http://localhost:8000/api/projects/${projectId}/study/upload-document`,
+        {
+          method: "POST",
+          body: formData,
+        }
+      );
+
+      const data = await response.json();
+
+      if (data.success) {
+        const newDoc: StudyDocument = {
+          id: data.document.id,
+          lesson_id: selectedLessonId,
+          name: data.document.name,
+          pages: data.document.pages,
+          content: data.document.content,
+          page_images: data.document.page_images || []
+        };
+        setDocuments(prev => [newDoc, ...prev]);
+        setActiveDocument(newDoc);
+      } else {
+        alert(`Upload failed: ${data.error || "Unknown error"}`);
+      }
+    } catch (err: any) {
+      alert(`Upload error: ${err.message || "Failed to reach backend server."}`);
+    }
+
+    e.target.value = '';
+  };
+
+  // --- HANDLER: SAVE AI OUTPUT TO CURRENT LESSON ---
+  const handleSaveToLesson = () => {
+    if (!aiOutput || !selectedLessonId) return;
+
+    const entryType: 'summary' | 'explanation' | 'practice_qa' = 
+      activeAction === 'summarize' ? 'summary' :
+      activeAction === 'explain' ? 'explanation' : 'practice_qa';
+
+    const newEntry: LessonEntry = {
+      id: `entry-${Date.now()}`,
+      title: `${activeAction ? activeAction.toUpperCase() : 'NOTE'} - ${activeDocument?.name || 'General Context'}`,
+      type: entryType,
+      snippet: activeSnippet,
+      content: aiOutput,
+      createdAt: new Date().toLocaleString()
+    };
+
+    setLessons(prev => prev.map(lesson => {
+      if (lesson.id === selectedLessonId) {
+        return { ...lesson, entries: [...lesson.entries, newEntry] };
+      }
+      return lesson;
+    }));
+
+    alert(`Saved to lesson "${activeLesson?.title}"!`);
+  };
+
+  // --- HANDLER: EXPORT LESSON CONTENT OR SNIPPETS TO PDF ---
+  const handleDownloadPdf = async (targetRef: React.RefObject<HTMLDivElement | null>, filenamePrefix: string) => {
+    if (!targetRef.current) return;
+
+    setIsExportingPdf(true);
+
+    try {
+      const html2pdf = (await import('html2pdf.js')).default;
+      const element = targetRef.current;
+      const opt = {
+        margin:       [0.4, 0.4, 0.4, 0.4],
+        filename:     `${filenamePrefix}_${activeLesson?.title.replace(/\s+/g, '_') || 'Lesson'}.pdf`,
+        image:        { type: 'jpeg', quality: 0.98 },
+        html2canvas:  { scale: 2, useCORS: true },
+        jsPDF:        { unit: 'in', format: 'letter', orientation: 'portrait' }
+      };
+
+      await html2pdf().set(opt).from(element).save();
     } catch (err) {
-      console.error("Failed to load saved study items:", err);
+      console.error("PDF Export error:", err);
+      alert("Failed to export PDF. Ensure html2pdf.js is installed.");
     } finally {
-      setIsLoadingSavedItems(false);
+      setIsExportingPdf(false);
     }
   };
-  loadSavedItems();
-}, [projectId]);
-
-// --- HANDLER: UPLOAD DOCUMENT ---
-// CHANGED: no longer reads the raw file locally with FileReader.readAsText().
-// That was dumping raw PDF binary bytes (%PDF-1.5, stream, endobj...) straight
-// into the viewer, which is the garbage text you were seeing.
-// Now this POSTs the actual file to the FastAPI backend, which uses pdfplumber
-// to properly extract clean text server-side, then we use THAT response
-// to populate the document — not the raw file.
-const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-
-  // Build multipart form data — matches FastAPI's `file: UploadFile = File(...)` param
-  const formData = new FormData();
-  formData.append("file", file);
-
-  try {
-    const response = await fetch(
-      `http://localhost:8000/api/projects/${projectId}/study/upload-document`,
-      {
-        method: "POST",
-        body: formData,
-        // NOTE: do NOT manually set Content-Type here — the browser sets the
-        // correct multipart/form-data boundary automatically when using FormData.
-      }
-    );
-
-    const data = await response.json();
-
-    if (data.success) {
-      // Use the backend's cleanly-extracted content, id, and page count —
-      // not anything read locally from the raw file.
-      const newDoc: StudyDocument = {
-        id: data.document.id,
-        name: data.document.name,
-        pages: data.document.pages,
-        content: data.document.content,
-        // NEW: carry the page-image fallbacks through to the viewer
-        page_images: data.document.page_images || []
-      };
-      setDocuments(prev => [newDoc, ...prev]);
-      setActiveDocument(newDoc);
-    } else {
-      console.error("Upload failed:", data.error);
-      alert(`Upload failed: ${data.error || "Unknown error"}`);
-    }
-  } catch (err: any) {
-    console.error("Upload error:", err);
-    alert(`Upload error: ${err.message || "Failed to reach backend server."}`);
-  }
-
-  e.target.value = '';
-};
 
   // --- HANDLER: TEXT HIGHLIGHT CAPTURE ---
   const handleTextSelection = () => {
@@ -209,7 +359,7 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     }
   };
 
-  // --- HELPER: EXTRACT TEXT WITHIN CROP BOX COORDINATES ---
+  // --- HELPER: CROP BOX TEXT EXTRACTION ---
   const extractTextFromCropBox = (box: { x: number; y: number; width: number; height: number }) => {
     if (!viewerRef.current) return '';
     const viewerRect = viewerRef.current.getBoundingClientRect();
@@ -249,7 +399,6 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     return extractedChars.join('').replace(/\s+/g, ' ').trim();
   };
 
-  // --- HANDLERS: CROP AREA SELECTION ---
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (selectionMode !== 'crop' || !viewerRef.current) return;
     const rect = viewerRef.current.getBoundingClientRect();
@@ -288,16 +437,13 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     }
   };
 
-  // --- RENDERER: HIGHLIGHT TEXT IN CONTENT ---
   const renderHighlightedContent = (content: string) => {
     if (!highlights.length) return content;
-
     const escaped = highlights
       .filter(h => h.trim().length > 0)
       .map(h => h.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&'));
 
     if (!escaped.length) return content;
-
     const regex = new RegExp(`(${escaped.join('|')})`, 'gi');
     const parts = content.split(regex);
 
@@ -313,11 +459,7 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
       return part;
     });
   };
-  
 
- // NEW: splits content on the [[PAGE_IMAGE:N]] marker tokens the backend
-  // inserts for unreliable-text pages, and renders an actual <img> in place
-  // of each token instead of ever showing raw garbled (cid:N) text.
   const renderContentWithImages = (content: string, pageImages: { page: number; image_base64: string }[] = []) => {
     const parts = content.split(/\[\[PAGE_IMAGE:(\d+)\]\]/g);
     return parts.map((part, idx) => {
@@ -343,10 +485,7 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     });
   };
 
-
-  // --- HANDLER: RUN AI ACTION ON CAPTURED SNIPPET ---
   const handleRunAiAction = async (action: AIAction) => {
-    // CHANGED: guard against activeDocument being null now that there's no default doc.
     if (!activeSnippet.trim() || isProcessingAction || !activeDocument) return;
 
     setActiveAction(action);
@@ -362,7 +501,8 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
           action: action,
           snippet: activeSnippet,
           document_name: activeDocument.name,
-          project_id: projectId
+          project_id: projectId,
+          lesson_id: selectedLessonId
         })
       });
 
@@ -371,14 +511,9 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
       if (data.success) {
         setAiOutput(data.result);
 
-                // === FIX 2: saved summaries/flashcards persistence ===
-        // Push this result straight into the saved list so it shows up in
-        // "Saved Summaries & Flashcards" immediately — it's already
-        // persisted server-side (process-snippet just saved it and handed
-        // back its id/created_at), this just keeps the UI in sync without
-        // a full refetch.
         setSavedItems(prev => [{
           id: data.action_id,
+          lesson_id: selectedLessonId,
           document_name: activeDocument.name,
           action_type: action,
           engine: selectedAI,
@@ -391,17 +526,12 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         throw new Error(data.error || "Failed to process snippet.");
       }
     } catch (err: any) {
-      // CHANGED: removed the three canned fake outputs (summarize/explain/questions)
-      // that used to silently pretend the AI call succeeded. Now a failed call shows
-      // a real error to the user instead of misleading fabricated text.
-      console.error(err);
       setAiOutput(`⚠️ Error: ${err.message || "Failed to process snippet. Please try again."}`);
     } finally {
       setIsProcessingAction(false);
     }
   };
 
-  // --- HANDLER: CHAT MESSAGE ---
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!chatInput.trim() || isAiTyping) return;
@@ -421,8 +551,6 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
           message: userText,
           code_context: activeSnippet,
           question_metadata: {
-            // CHANGED: activeDocument can be null now, so this no longer assumes
-            // a document is always selected.
             title: `Document Context: ${activeDocument ? activeDocument.name : 'No document selected'}`,
             difficulty: 'Medium'
           }
@@ -460,15 +588,56 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const currentLessonSavedItems = savedItems.filter(item => !item.lesson_id || item.lesson_id === selectedLessonId);
+
+  // Dynamic Class Helper for Custom Styling
+  const getStyleClasses = (style?: LessonEntry['style']) => {
+    if (!style) return 'text-xs text-slate-200';
+    let classes = '';
+    
+    // Font Weight
+    if (style.isBold) classes += ' font-bold';
+    else classes += ' font-normal';
+
+    // Font Style
+    if (style.isItalic) classes += ' italic';
+
+    // Font Size
+    switch (style.fontSize) {
+      case 'small':
+        classes += ' text-[11px]';
+        break;
+      case 'large':
+        classes += ' text-sm';
+        break;
+      case 'heading':
+        classes += ' text-base font-bold text-blue-300';
+        break;
+      case 'normal':
+      default:
+        classes += ' text-xs';
+        break;
+    }
+
+    return classes;
+  };
+
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col font-sans">
 
-      {/* HIDDEN FILE INPUT */}
+      {/* HIDDEN FILE INPUTS */}
       <input
         type="file"
         ref={fileInputRef}
         onChange={handleFileUpload}
         accept=".pdf,.txt,.doc,.docx,.pptx"
+        className="hidden"
+      />
+      <input
+        type="file"
+        ref={sectionImageInputRef}
+        onChange={handleSectionImageUpload}
+        accept="image/*"
         className="hidden"
       />
 
@@ -509,32 +678,30 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
       {/* 2-PANEL SPLIT WORKSPACE */}
       <div className="flex flex-1 overflow-hidden">
 
-        {/* LEFT PANEL: UPLOADED DOCUMENTS & INTERACTIVE READER */}
+        {/* LEFT PANEL: LESSON PDF DOCUMENTS & READER */}
         <section className="w-1/2 p-4 flex flex-col border-r border-slate-800 bg-slate-950/40 overflow-y-auto">
           
           {/* Document Controls Header */}
           <div className="flex items-center justify-between mb-4 bg-slate-950 p-2.5 rounded-xl border border-slate-800">
             <div className="flex items-center gap-2">
-              <span className="text-xs text-slate-400 font-medium pl-1">Document:</span>
-              {/* CHANGED: dropdown only renders once there's at least one real document.
-                  Previously this assumed documents[0] always existed. */}
-              {documents.length > 0 ? (
+              <span className="text-xs text-slate-400 font-medium pl-1">Lesson PDFs:</span>
+              {lessonDocuments.length > 0 ? (
                 <select
                   value={activeDocument?.id}
                   onChange={(e) => {
-                    const doc = documents.find(d => d.id === Number(e.target.value));
+                    const doc = lessonDocuments.find(d => d.id === Number(e.target.value));
                     if (doc) setActiveDocument(doc);
                   }}
                   className="bg-slate-900 border border-slate-800 text-xs text-slate-200 rounded-lg px-3 py-1.5 focus:outline-none focus:border-blue-500/50"
                 >
-                  {documents.map(doc => (
+                  {lessonDocuments.map(doc => (
                     <option key={doc.id} value={doc.id}>
                       {doc.name} ({doc.pages} pgs)
                     </option>
                   ))}
                 </select>
               ) : (
-                <span className="text-xs text-slate-600 italic">No documents uploaded yet</span>
+                <span className="text-xs text-slate-600 italic">No PDFs in "{activeLesson?.title || 'Lesson'}"</span>
               )}
             </div>
 
@@ -568,7 +735,7 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
                 onClick={() => fileInputRef.current?.click()}
                 className="bg-purple-900/40 text-purple-300 hover:bg-purple-900/60 border border-purple-500/30 text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors"
               >
-                + Upload PDF
+                + Upload PDF to {activeLesson?.title || 'Lesson'}
               </button>
             </div>
           </div>
@@ -583,7 +750,6 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
               selectionMode === 'crop' ? 'cursor-crosshair select-none' : 'cursor-text select-text'
             }`}
           >
-            {/* Visual Drag Box for Crop Mode */}
             {selectionMode === 'crop' && cropBox && (
               <div
                 className="absolute border-2 border-dashed border-blue-400 bg-blue-500/20 pointer-events-none rounded z-10"
@@ -596,10 +762,6 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
               />
             )}
 
-            {/* CHANGED: this whole block is now conditional on activeDocument existing.
-                Previously it assumed activeDocument was always set (from the fake seed data)
-                and also included a hardcoded "Click to Capture Snippet" demo box with a
-                fake sentence baked into its onClick — that box has been deleted entirely. */}
             {activeDocument ? (
               <>
                 <div className="flex items-center justify-between pb-3 mb-4 border-b border-slate-900 text-xs text-slate-500">
@@ -607,27 +769,33 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
                   <span className="capitalize">Mode: {selectionMode} Selection</span>
                 </div>
 
-               <div className="space-y-4 text-xs sm:text-sm text-slate-300 leading-relaxed font-sans">
+                <div className="space-y-4 text-xs sm:text-sm text-slate-300 leading-relaxed font-sans">
                   <div className="whitespace-pre-wrap">
                     {renderContentWithImages(activeDocument.content, activeDocument.page_images)}
                   </div>
                 </div>
               </>
             ) : (
-              // CHANGED: new empty-state placeholder shown until a real document is uploaded.
               <div className="flex flex-col items-center justify-center h-full text-center text-slate-500 text-xs gap-2">
-                <p>No document uploaded yet.</p>
-                <p>Click "+ Upload PDF" above to get started.</p>
+                <p>No document uploaded for <strong>"{activeLesson?.title}"</strong>.</p>
+                <p>Click "+ Upload PDF to {activeLesson?.title}" above to add your study material.</p>
               </div>
             )}
           </div>
         </section>
 
-        {/* RIGHT PANEL: AI STUDY COMPANION & ACTION ENGINE */}
+        {/* RIGHT PANEL: AI ASSISTANT, LESSONS & SNIPPETS */}
         <section className="w-1/2 flex flex-col bg-slate-900">
 
           {/* Navigation Tabs */}
           <div className="flex bg-slate-950/60 border-b border-slate-800 px-4 text-xs">
+            <button
+              type="button"
+              onClick={() => setActiveTab('lessons')}
+              className={`py-3 px-4 font-semibold border-b-2 transition-colors ${activeTab === 'lessons' ? 'border-blue-500 text-blue-400' : 'border-transparent text-slate-400 hover:text-slate-200'}`}
+            >
+              📚 Lesson Modules & PDF
+            </button>
             <button
               type="button"
               onClick={() => setActiveTab('ai-chat')}
@@ -640,30 +808,266 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
               onClick={() => setActiveTab('notes')}
               className={`py-3 px-4 font-semibold border-b-2 transition-colors ${activeTab === 'notes' ? 'border-blue-500 text-blue-400' : 'border-transparent text-slate-400 hover:text-slate-200'}`}
             >
-              📝 Saved Summaries & Flashcards
+              📝 Saved Snippets
             </button>
           </div>
 
           <div className="flex-1 p-6 overflow-y-auto flex flex-col justify-between min-h-0">
+            
+            {/* LESSON MODULES VIEW */}
+            {activeTab === 'lessons' && (
+              <div className="space-y-6 overflow-y-auto flex-1 pr-1">
+                {/* Lesson Selection & Creation Header */}
+                <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-xs font-bold uppercase tracking-wider text-blue-400">
+                      LESSON MODULES
+                    </h2>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowAddSectionModal(true)}
+                        className="bg-blue-600/30 text-blue-300 border border-blue-500/40 hover:bg-blue-600/50 text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1"
+                      >
+                        ✏️ + Add Written Section
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadPdf(lessonPdfExportRef, `Lesson_Summary`)}
+                        disabled={isExportingPdf || !activeLesson?.entries.length}
+                        className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5"
+                      >
+                        {isExportingPdf ? 'Generating PDF...' : '📄 Download PDF'}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    {/* Select / Open Existing Lesson */}
+                    <select
+                      value={selectedLessonId}
+                      onChange={(e) => setSelectedLessonId(e.target.value)}
+                      className="bg-slate-900 border border-slate-800 text-xs text-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500/50"
+                    >
+                      {lessons.map(l => (
+                        <option key={l.id} value={l.id}>
+                          Open: {l.title} ({l.entries.length} saved)
+                        </option>
+                      ))}
+                    </select>
+
+                    {/* Create New Lesson */}
+                    <div className="flex gap-1">
+                      <input
+                        type="text"
+                        value={newLessonTitle}
+                        onChange={(e) => setNewLessonTitle(e.target.value)}
+                        placeholder="New Lesson Title..."
+                        className="flex-1 bg-slate-900 border border-slate-800 text-xs text-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-blue-500/50"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleCreateLesson}
+                        className="bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1.5 rounded-lg font-semibold"
+                      >
+                        + Create
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* MODAL: ADD CUSTOM MANUAL SECTION WITH RICH TEXT & IMAGE */}
+                {showAddSectionModal && (
+                  <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                    <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 max-w-lg w-full space-y-4 shadow-2xl">
+                      <div className="flex justify-between items-center border-b border-slate-800 pb-2">
+                        <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                          ✏️ Write Custom Section for <span className="text-blue-400">"{activeLesson?.title}"</span>
+                        </h3>
+                        <button
+                          onClick={() => setShowAddSectionModal(false)}
+                          className="text-slate-400 hover:text-white text-sm"
+                        >
+                          ✕
+                        </button>
+                      </div>
+
+                      {/* Title */}
+                      <div>
+                        <label className="text-[11px] font-bold text-slate-400 uppercase block mb-1">Section Title</label>
+                        <input
+                          type="text"
+                          value={customSectionTitle}
+                          onChange={(e) => setCustomSectionTitle(e.target.value)}
+                          placeholder="e.g. My Personal Summary or Key Equations"
+                          className="w-full bg-slate-950 border border-slate-800 text-xs text-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
+                        />
+                      </div>
+
+                      {/* Rich Text Formatting Toolbar */}
+                      <div>
+                        <label className="text-[11px] font-bold text-slate-400 uppercase block mb-1">Formatting & Styling Options</label>
+                        <div className="flex items-center gap-2 bg-slate-950 p-2 rounded-lg border border-slate-800 text-xs">
+                          <button
+                            type="button"
+                            onClick={() => setCustomSectionBold(!customSectionBold)}
+                            className={`px-2.5 py-1 rounded font-bold border ${customSectionBold ? 'bg-blue-600 text-white border-blue-500' : 'bg-slate-900 text-slate-400 border-slate-800'}`}
+                          >
+                            B
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setCustomSectionItalic(!customSectionItalic)}
+                            className={`px-2.5 py-1 rounded italic border ${customSectionItalic ? 'bg-blue-600 text-white border-blue-500' : 'bg-slate-900 text-slate-400 border-slate-800'}`}
+                          >
+                            I
+                          </button>
+
+                          <div className="h-4 w-px bg-slate-800 mx-1"></div>
+
+                          <span className="text-[11px] text-slate-500">Size:</span>
+                          <select
+                            value={customSectionFontSize}
+                            onChange={(e: any) => setCustomSectionFontSize(e.target.value)}
+                            className="bg-slate-900 border border-slate-800 text-xs text-slate-200 rounded px-2 py-1"
+                          >
+                            <option value="small">Small</option>
+                            <option value="normal">Normal</option>
+                            <option value="large">Large</option>
+                            <option value="heading">Heading</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      {/* Content Area */}
+                      <div>
+                        <label className="text-[11px] font-bold text-slate-400 uppercase block mb-1">Content / Written Notes</label>
+                        <textarea
+                          rows={4}
+                          value={customSectionContent}
+                          onChange={(e) => setCustomSectionContent(e.target.value)}
+                          placeholder="Write your study notes or explanation here..."
+                          className={`w-full bg-slate-950 border border-slate-800 text-slate-200 rounded-lg p-3 focus:outline-none focus:border-blue-500 ${
+                            customSectionBold ? 'font-bold' : ''
+                          } ${customSectionItalic ? 'italic' : ''}`}
+                        />
+                      </div>
+
+                      {/* Image Embed Options */}
+                      <div>
+                        <label className="text-[11px] font-bold text-slate-400 uppercase block mb-1">Include Image (Optional)</label>
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={customSectionImageUrl}
+                            onChange={(e) => setCustomSectionImageUrl(e.target.value)}
+                            placeholder="Image URL or upload local file..."
+                            className="flex-1 bg-slate-950 border border-slate-800 text-xs text-slate-200 rounded-lg px-3 py-1.5 focus:outline-none focus:border-blue-500"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => sectionImageInputRef.current?.click()}
+                            className="bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 px-3 py-1.5 rounded-lg border border-slate-700"
+                          >
+                            🖼️ Browse
+                          </button>
+                        </div>
+                        {customSectionImageUrl && (
+                          <div className="mt-2 border border-slate-800 rounded p-1 max-h-32 overflow-hidden bg-slate-950 flex items-center justify-center">
+                            <img src={customSectionImageUrl} alt="Preview" className="max-h-28 object-contain" />
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Actions */}
+                      <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+                        <button
+                          type="button"
+                          onClick={() => setShowAddSectionModal(false)}
+                          className="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs px-4 py-2 rounded-lg font-semibold"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleAddManualSection}
+                          className="bg-blue-600 hover:bg-blue-500 text-white text-xs px-4 py-2 rounded-lg font-semibold"
+                        >
+                          Save Section
+                        </button>
+                      </div>
+
+                    </div>
+                  </div>
+                )}
+
+                {/* Printable Formatted Container for PDF Export */}
+                <div ref={lessonPdfExportRef} className="space-y-4 bg-slate-950 border border-slate-800 rounded-xl p-6 text-slate-100">
+                  {/* Clean PDF Header */}
+                  <div className="border-b-2 border-blue-500/50 pb-4 mb-4">
+                    <span className="text-[10px] uppercase font-bold tracking-widest text-blue-400 block">LESSON SUMMARY REPORT</span>
+                    <h1 className="text-xl font-black text-white mt-1">{activeLesson?.title || 'Selected Lesson'}</h1>
+                    <p className="text-xs text-slate-400 mt-1">{projectName} • Practice Questions, Explanations & Written Sections</p>
+                  </div>
+
+                  {!activeLesson?.entries.length ? (
+                    <div className="text-xs text-slate-500 italic py-8 text-center border border-dashed border-slate-800 rounded-lg">
+                      No materials saved to this lesson yet. Run summaries, write custom sections, or quizzes in the AI Assistant tab and click "+ Save to Lesson".
+                    </div>
+                  ) : (
+                    activeLesson.entries.map((entry, idx) => (
+                      <div key={entry.id} className="border-b border-slate-800/80 pb-4 mb-4 last:border-0 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] font-bold uppercase tracking-wider text-amber-400">
+                            #{idx + 1} {entry.type.replace('_', ' ')}: {entry.title}
+                          </span>
+                          <span className="text-[10px] text-slate-500">{entry.createdAt}</span>
+                        </div>
+
+                        {entry.snippet && (
+                          <blockquote className="text-xs italic text-slate-300 border-l-2 border-blue-500 pl-3 py-1 bg-slate-900/80 rounded-r">
+                            "{entry.snippet}"
+                          </blockquote>
+                        )}
+
+                        {/* Content Render with Custom Styling */}
+                        <div className={`whitespace-pre-wrap leading-relaxed pt-1 ${getStyleClasses(entry.style)}`}>
+                          {entry.content}
+                        </div>
+
+                        {/* Embedded Custom Section Image */}
+                        {entry.image_url && (
+                          <div className="mt-3 border border-slate-800 rounded-lg overflow-hidden bg-slate-900 max-w-md">
+                            <img src={entry.image_url} alt="Section Attachment" className="w-full h-auto object-cover" />
+                          </div>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* AI CHAT & ACTION ENGINE */}
             {activeTab === 'ai-chat' && (
               <div className="flex flex-col h-full justify-between flex-1">
 
                 <div className="space-y-4 overflow-y-auto flex-1 pr-1 pb-4">
                   
-                  {/* Active Snippet Display */}
+                  {/* Active Snippet */}
                   <div className="bg-slate-950 border border-slate-800 rounded-xl p-3">
                     <span className="text-[10px] font-bold uppercase tracking-wider text-blue-400 block mb-1">
-                      Active Selected Text
+                      Active Selected Snippet ({activeLesson?.title})
                     </span>
                     <p className="text-xs text-slate-300 italic font-mono bg-slate-900/80 p-2.5 rounded border border-slate-800">
-                      "{activeSnippet || 'No snippet selected.'}"
+                      "{activeSnippet || 'No snippet selected from document.'}"
                     </p>
                   </div>
 
-                  {/* AI Action Triggers */}
+                  {/* Actions */}
                   <div>
                     <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-2">
-                      Run Action on Selection
+                      Run AI Action on Snippet
                     </span>
                     <div className="grid grid-cols-3 gap-2">
                       <button
@@ -702,33 +1106,44 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
                             : 'bg-slate-950 border-slate-800 text-slate-300 hover:bg-slate-800'
                         }`}
                       >
-                        ❓ Generate Questions
+                        ❓ Generate Q&A
                       </button>
                     </div>
                   </div>
 
-                  {/* AI Action Output */}
+                  {/* Output */}
                   {(isProcessingAction || aiOutput) && (
                     <div className="bg-slate-950 border border-slate-800 rounded-xl p-4">
                       <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-900">
                         <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">
                           {activeAction} Output ({selectedAI})
                         </span>
-                        {aiOutput && (
-                          <button
-                            type="button"
-                            onClick={handleCopyOutput}
-                            className="text-[11px] text-slate-400 hover:text-white transition-colors"
-                          >
-                            {copied ? '✓ Copied' : 'Copy'}
-                          </button>
-                        )}
+                        <div className="flex items-center gap-2">
+                          {aiOutput && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={handleSaveToLesson}
+                                className="text-[11px] bg-blue-600/30 text-blue-300 border border-blue-500/30 px-2 py-0.5 rounded hover:bg-blue-600/50 transition-colors"
+                              >
+                                + Save to {activeLesson?.title || 'Lesson'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={handleCopyOutput}
+                                className="text-[11px] text-slate-400 hover:text-white transition-colors"
+                              >
+                                {copied ? '✓ Copied' : 'Copy'}
+                              </button>
+                            </>
+                          )}
+                        </div>
                       </div>
 
                       {isProcessingAction ? (
                         <div className="flex items-center gap-2 py-4 text-xs text-slate-400">
                           <span className="w-3.5 h-3.5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></span>
-                          <span>Processing snippet with AI...</span>
+                          <span>Processing snippet...</span>
                         </div>
                       ) : (
                         <p className="text-xs text-slate-300 whitespace-pre-wrap leading-relaxed">
@@ -738,7 +1153,7 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
                     </div>
                   )}
 
-                  {/* Chat Messages */}
+                  {/* Messages */}
                   <div className="space-y-3 pt-2">
                     {messages.map((msg) => (
                       <div
@@ -771,21 +1186,20 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
 
                 </div>
 
-                {/* Bottom Chat Input Form */}
+                {/* Input */}
                 <div className="mt-4 pt-4 border-t border-slate-800">
                   <form onSubmit={handleSendMessage} className="flex gap-2">
                     <input
                       type="text"
                       value={chatInput}
                       onChange={(e) => setChatInput(e.target.value)}
-                      disabled={isAiTyping || isProcessingAction}
-                      placeholder={`Ask ${selectedAI} follow-up questions...`}
-                      className="flex-1 bg-slate-950 text-slate-200 text-xs sm:text-sm rounded-lg px-4 border border-slate-800 focus:outline-none focus:border-blue-500/50 disabled:opacity-50"
+                      placeholder={`Ask ${selectedAI} about this document...`}
+                      className="flex-1 bg-slate-950 border border-slate-800 text-xs text-slate-200 rounded-lg px-3 py-2.5 focus:outline-none focus:border-blue-500/50 placeholder:text-slate-600"
                     />
                     <button
                       type="submit"
-                      disabled={isAiTyping || isProcessingAction}
-                      className="bg-blue-600 hover:bg-blue-700 disabled:bg-blue-800/40 text-white font-semibold text-xs px-4 py-2.5 rounded-lg transition-colors"
+                      disabled={isAiTyping || !chatInput.trim()}
+                      className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-semibold px-4 py-2.5 rounded-lg transition-colors"
                     >
                       Send
                     </button>
@@ -795,41 +1209,60 @@ const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
               </div>
             )}
 
-                       {activeTab === 'notes' && (
-              // === FIX 2: saved summaries/flashcards persistence ===
-              // Real, DB-backed list of every summarize/explain/questions
-              // result saved for this project — loaded via GET
-              // /study/saved-items on mount, kept in sync locally whenever
-              // a new action runs successfully.
-              <div className="space-y-3">
-                <h3 className="font-bold text-white text-sm mb-1">Saved Key Concepts</h3>
+            {/* SAVED SNIPPETS VIEW WITH PDF EXPORT */}
+            {activeTab === 'notes' && (
+              <div className="space-y-4 overflow-y-auto flex-1">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                    Saved Snippets ({activeLesson?.title || 'All'})
+                  </h2>
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadPdf(snippetsPdfExportRef, `Snippets_Report`)}
+                    disabled={isExportingPdf || currentLessonSavedItems.length === 0}
+                    className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors"
+                  >
+                    Export Snippets PDF
+                  </button>
+                </div>
 
-                {isLoadingSavedItems && (
-                  <p className="text-xs text-slate-500">Loading saved items…</p>
-                )}
-
-                {!isLoadingSavedItems && savedItems.length === 0 && (
-                  <p className="text-xs text-slate-500">
-                    Nothing saved yet — run Summarize, Explain Concept, or Generate Questions
-                    on a selection and it'll show up here permanently, even after a refresh
-                    or logging back in.
-                  </p>
-                )}
-
-                {savedItems.map(item => (
-                  <div key={item.id} className="p-4 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-300">
-                    <div className="flex items-center justify-between mb-2 gap-2">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">
-                        {item.action_type} · {item.engine}
-                      </span>
-                      <span className="text-[10px] text-slate-500 text-right">
-                        {item.document_name} · {new Date(item.created_at).toLocaleString()}
-                      </span>
-                    </div>
-                    <p className="text-slate-500 italic mb-2">"{item.snippet_text}"</p>
-                    <p className="whitespace-pre-wrap leading-relaxed">{item.ai_reply}</p>
+                <div ref={snippetsPdfExportRef} className="space-y-4 bg-slate-950 p-4 rounded-xl border border-slate-800">
+                  <div className="border-b border-blue-500/40 pb-3 mb-2">
+                    <span className="text-[10px] font-bold uppercase text-blue-400">LESSON SNIPPETS</span>
+                    <h2 className="text-lg font-bold text-white">{activeLesson?.title}</h2>
                   </div>
-                ))}
+
+                  {isLoadingSavedItems ? (
+                    <div className="flex items-center gap-2 text-xs text-slate-400 py-4">
+                      <span className="w-3.5 h-3.5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></span>
+                      <span>Loading saved items...</span>
+                    </div>
+                  ) : currentLessonSavedItems.length === 0 ? (
+                    <div className="text-xs text-slate-500 italic py-4">
+                      No saved items found for this lesson.
+                    </div>
+                  ) : (
+                    currentLessonSavedItems.map((item) => (
+                      <div key={item.id} className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-2">
+                        <div className="flex items-center justify-between text-[10px] text-slate-400">
+                          <span className="uppercase font-bold text-blue-400">
+                            {item.action_type} ({item.engine})
+                          </span>
+                          <span>{new Date(item.created_at).toLocaleDateString()}</span>
+                        </div>
+                        {item.document_name && (
+                          <div className="text-[10px] text-slate-500">Document: {item.document_name}</div>
+                        )}
+                        <p className="text-xs text-slate-300 italic font-mono bg-slate-950 p-2 rounded border border-slate-800">
+                          "{item.snippet_text}"
+                        </p>
+                        <p className="text-xs text-slate-300 whitespace-pre-wrap leading-relaxed pt-1">
+                          {item.ai_reply}
+                        </p>
+                      </div>
+                    ))
+                  )}
+                </div>
               </div>
             )}
           </div>
