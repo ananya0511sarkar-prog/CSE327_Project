@@ -62,7 +62,8 @@ print("="*60 + "\n")
 
 # ─── DATABASE SETUP ─────────────────────────────────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL")
-engine = create_async_engine(DATABASE_URL)
+#engine = create_async_engine(DATABASE_URL)
+engine = create_async_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=300)
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 Base = declarative_base()
 
@@ -131,6 +132,7 @@ class StudyDocumentDB(Base):
     __tablename__ = "study_documents"
     id = Column(Integer, primary_key=True, index=True)
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    lesson_id = Column(Integer, ForeignKey("study_lessons.id"), nullable=True)  # === LESSONS BACKEND ===
     name = Column(String, nullable=False)
     content = Column(String, nullable=False)
     pages = Column(Integer, default=1)
@@ -146,6 +148,7 @@ class StudyActionDB(Base):
     id = Column(Integer, primary_key=True, index=True)
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
     document_name = Column(String, nullable=True)
+    lesson_id = Column(Integer, ForeignKey("study_lessons.id"), nullable=True)  # === LESSONS BACKEND ===
     action_type = Column(String, nullable=False)   # "summarize" | "explain" | "questions" | "chat"
     engine = Column(String, nullable=False)
     snippet_text = Column(String, nullable=False)
@@ -184,7 +187,29 @@ async def get_current_user(
         raise credentials_exception
     return user
 
+# === LESSONS BACKEND: new tables for real (non-hardcoded) study sessions ===
+class StudyLessonDB(Base):
+    __tablename__ = "study_lessons"
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    title = Column(String, nullable=False)
+    description = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+
+class StudyLessonEntryDB(Base):
+    __tablename__ = "study_lesson_entries"
+    id = Column(Integer, primary_key=True, index=True)
+    lesson_id = Column(Integer, ForeignKey("study_lessons.id"), nullable=False)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    title = Column(String, nullable=False)
+    type = Column(String, nullable=False)   # "summary" | "explanation" | "practice_qa" | "manual_section"
+    snippet = Column(String, nullable=True)
+    content = Column(String, nullable=False)
+    image_url = Column(String, nullable=True)
+    style = Column(String, nullable=True)   # JSON string: {"isBold":.., "isItalic":.., "fontSize":..}
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+# === END LESSONS BACKEND: new tables ===
 
 
 
@@ -271,6 +296,7 @@ class ProcessSnippetRequest(BaseModel):
     snippet: str
     document_name: str
     project_id: str
+    lesson_id: Optional[int] = None   # NEW: so saved snippets can be scoped to a lesson
 
 #to save questions in db
 class ProjectQuestionDB(Base):
@@ -328,6 +354,7 @@ class QuestionEvaluationOut(BaseModel):
 class SavedStudyItemOut(BaseModel):
     id: int
     document_name: Optional[str] = None
+    lesson_id: Optional[int] = None   # NEW
     action_type: str
     engine: str
     snippet_text: str
@@ -336,6 +363,46 @@ class SavedStudyItemOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+
+# === LESSONS BACKEND: request/response schemas ===
+class LessonCreate(BaseModel):
+    title: str
+    description: Optional[str] = None
+
+class LessonOut(BaseModel):
+    id: int
+    title: str
+    description: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class LessonEntryCreate(BaseModel):
+    title: str
+    type: str            # "summary" | "explanation" | "practice_qa" | "manual_section"
+    snippet: Optional[str] = None
+    content: str
+    image_url: Optional[str] = None
+    style: Optional[Dict[str, Any]] = None   # {"isBold":.., "isItalic":.., "fontSize":..}
+
+class LessonEntryOut(BaseModel):
+    id: int
+    lesson_id: int
+    title: str
+    type: str
+    snippet: Optional[str] = None
+    content: str
+    image_url: Optional[str] = None
+    style: Optional[Dict[str, Any]] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+# === END LESSONS BACKEND: schemas ===
 
 # ─── AUTH ENDPOINTS ─────────────────────────────────────────────────
 @app.post("/api/auth/signup")
@@ -838,6 +905,7 @@ async def handle_process_snippet(
         new_action = StudyActionDB(
             project_id=int(project_id),
             document_name=payload.document_name,
+            lesson_id=payload.lesson_id,   # NEW: persist which lesson this snippet belongs to
             action_type=payload.action,
             engine=payload.engine,
             snippet_text=payload.snippet,
@@ -899,6 +967,7 @@ async def upload_study_document(
 
         new_doc = StudyDocumentDB(
             project_id=int(project_id),
+            #lesson_id = Column(Integer, ForeignKey("study_lessons.id"), nullable=True)  # === LESSONS BACKEND ===
             name=file.filename,
             content=extracted_text.strip(),
             pages=page_count,
@@ -947,3 +1016,92 @@ async def get_saved_study_items(project_id: str, db: AsyncSession = Depends(get_
         .order_by(StudyActionDB.created_at.desc())
     )
     return result.scalars().all()
+
+
+
+# === LESSONS BACKEND: lesson + entry endpoints ===
+@app.get("/api/projects/{project_id}/study/lessons", response_model=list[LessonOut])
+async def get_lessons(project_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(StudyLessonDB)
+        .where(StudyLessonDB.project_id == int(project_id))
+        .order_by(StudyLessonDB.created_at)
+    )
+    return result.scalars().all()
+
+
+@app.post("/api/projects/{project_id}/study/lessons", response_model=LessonOut)
+async def create_lesson(project_id: str, payload: LessonCreate, db: AsyncSession = Depends(get_db)):
+    new_lesson = StudyLessonDB(
+        project_id=int(project_id),
+        title=payload.title,
+        description=payload.description
+    )
+    db.add(new_lesson)
+    await db.commit()
+    await db.refresh(new_lesson)
+    return new_lesson
+
+
+@app.get("/api/projects/{project_id}/study/lessons/{lesson_id}/entries", response_model=list[LessonEntryOut])
+async def get_lesson_entries(project_id: str, lesson_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(StudyLessonEntryDB)
+        .where(
+            StudyLessonEntryDB.project_id == int(project_id),
+            StudyLessonEntryDB.lesson_id == lesson_id
+        )
+        .order_by(StudyLessonEntryDB.created_at)
+    )
+    entries = result.scalars().all()
+
+    # style is stored as a JSON string in the DB; parse it back to a dict for the frontend
+    output = []
+    for entry in entries:
+        output.append(LessonEntryOut(
+            id=entry.id,
+            lesson_id=entry.lesson_id,
+            title=entry.title,
+            type=entry.type,
+            snippet=entry.snippet,
+            content=entry.content,
+            image_url=entry.image_url,
+            style=json.loads(entry.style) if entry.style else None,
+            created_at=entry.created_at
+        ))
+    return output
+
+
+@app.post("/api/projects/{project_id}/study/lessons/{lesson_id}/entries", response_model=LessonEntryOut)
+async def create_lesson_entry(
+    project_id: str,
+    lesson_id: int,
+    payload: LessonEntryCreate,
+    db: AsyncSession = Depends(get_db)
+):
+    new_entry = StudyLessonEntryDB(
+        project_id=int(project_id),
+        lesson_id=lesson_id,
+        title=payload.title,
+        type=payload.type,
+        snippet=payload.snippet,
+        content=payload.content,
+        image_url=payload.image_url,
+        style=json.dumps(payload.style) if payload.style else None
+    )
+    db.add(new_entry)
+    await db.commit()
+    await db.refresh(new_entry)
+
+    return LessonEntryOut(
+        id=new_entry.id,
+        lesson_id=new_entry.lesson_id,
+        title=new_entry.title,
+        type=new_entry.type,
+        snippet=new_entry.snippet,
+        content=new_entry.content,
+        image_url=new_entry.image_url,
+        style=json.loads(new_entry.style) if new_entry.style else None,
+        created_at=new_entry.created_at
+    )
+# === END LESSONS BACKEND: endpoints ===

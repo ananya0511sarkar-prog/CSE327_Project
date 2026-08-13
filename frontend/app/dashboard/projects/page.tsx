@@ -26,7 +26,9 @@ const mapApiProject = (p: any): Project => ({
   title: p.title,
   status: p.status,
   badgeColor: getBadgeColor(p.status),
-  date: new Date(p.created_at).toLocaleDateString('en-US', { month: 'long', day: '2-digit', year: 'numeric' }),
+  date: p.created_at && !isNaN(new Date(p.created_at).getTime())
+    ? new Date(p.created_at).toLocaleDateString('en-US', { month: 'long', day: '2-digit', year: 'numeric' })
+    : 'Recent',
   details: p.details,
   aiEngine: p.ai_engine,
 });
@@ -43,7 +45,7 @@ export default function ProjectsPage() {
 
   const [allProjects, setAllProjects] = useState<Project[]>([]);
 
-  useEffect(() => {
+useEffect(() => {
     const fetchProjects = async () => {
       const token = localStorage.getItem("token");
       try {
@@ -51,7 +53,14 @@ export default function ProjectsPage() {
           headers: { Authorization: `Bearer ${token}` }
         });
         const data = await res.json();
-        setAllProjects(data.map(mapApiProject));
+        
+        // Ensure data is an array before mapping to prevent runtime crashes
+        if (Array.isArray(data)) {
+          setAllProjects(data.map(mapApiProject));
+        } else {
+          console.error("API did not return an array:", data);
+          setAllProjects([]);
+        }
       } catch (err) {
         console.error("Failed to fetch projects:", err);
       }

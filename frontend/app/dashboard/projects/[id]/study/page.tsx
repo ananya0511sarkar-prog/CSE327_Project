@@ -18,7 +18,7 @@ interface Message {
 
 interface StudyDocument {
   id: number;
-  lesson_id: string;
+  lesson_id: number | null;
   name: string;
   pages: number;
   content: string;
@@ -27,7 +27,7 @@ interface StudyDocument {
 
 interface SavedItem {
   id: number;
-  lesson_id?: string;
+  lesson_id?: number | null;
   document_name?: string;
   action_type: string;
   engine: string;
@@ -37,7 +37,7 @@ interface SavedItem {
 }
 
 interface LessonEntry {
-  id: string;
+  id: number;
   title: string;
   type: 'summary' | 'explanation' | 'practice_qa' | 'manual_section';
   snippet?: string;
@@ -52,9 +52,9 @@ interface LessonEntry {
 }
 
 interface Lesson {
-  id: string;
+  id: number;
   title: string;
-  description: string;
+  description: string | null;
   entries: LessonEntry[];
 }
 
@@ -80,16 +80,10 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
   const [activeTab, setActiveTab] = useState<'ai-chat' | 'notes' | 'lessons'>('lessons');
 
   // --- LESSON STATES ---
-  const [lessons, setLessons] = useState<Lesson[]>([
-    {
-      id: 'lesson-cnn',
-      title: 'CNN',
-      description: 'Convolutional Neural Networks notes & practice',
-      entries: []
-    }
-  ]);
-  const [selectedLessonId, setSelectedLessonId] = useState<string>('lesson-cnn');
+  const [lessons, setLessons] = useState<Lesson[]>([]);
+  const [selectedLessonId, setSelectedLessonId] = useState<number | null>(null);
   const [newLessonTitle, setNewLessonTitle] = useState<string>('');
+  const [isLoadingLessons, setIsLoadingLessons] = useState<boolean>(true);
 
   // --- MANUAL SECTION FORM STATES ---
   const [showAddSectionModal, setShowAddSectionModal] = useState<boolean>(false);
@@ -136,6 +130,93 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
   const [savedItems, setSavedItems] = useState<SavedItem[]>([]);
   const [isLoadingSavedItems, setIsLoadingSavedItems] = useState(false);
   const [isExportingPdf, setIsExportingPdf] = useState<boolean>(false);
+
+  // --- SNIPPET → SESSION SELECTION STATES ---
+const [isSelectingSnippets, setIsSelectingSnippets] = useState<boolean>(false);
+const [selectedSnippetIds, setSelectedSnippetIds] = useState<Set<number>>(new Set());
+
+const [sessionPickerOpen, setSessionPickerOpen] = useState<boolean>(false);
+const [sessionPickerTargetIds, setSessionPickerTargetIds] = useState<number[]>([]);
+const [sessionPickerChoice, setSessionPickerChoice] = useState<string>('');
+
+
+//for text font size
+// NEW: live preview of font size while writing a manual section
+const getFontSizeClass = (size: typeof customSectionFontSize) => {
+  switch (size) {
+    case 'small': return 'text-[11px]';
+    case 'large': return 'text-sm';
+    case 'heading': return 'text-base font-bold';
+    case 'normal':
+    default: return 'text-xs';
+  }
+};
+
+
+
+
+const handleConfirmAddToSession = async () => {
+  if (!sessionPickerChoice || sessionPickerTargetIds.length === 0) {
+    setSessionPickerOpen(false);
+    return;
+  }
+
+  const targetLessonId = Number(sessionPickerChoice);
+  const itemsToAdd = savedItems.filter(item => sessionPickerTargetIds.includes(item.id));
+
+  const typeMap: Record<string, LessonEntry['type']> = {
+    summarize: 'summary',
+    explain: 'explanation',
+    questions: 'practice_qa',
+  };
+
+  const createdEntries: LessonEntry[] = [];
+
+  try {
+    for (const item of itemsToAdd) {
+      const res = await fetch(
+        `http://localhost:8000/api/projects/${projectId}/study/lessons/${targetLessonId}/entries`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: `${item.action_type.toUpperCase()} - ${item.document_name || 'General Context'}`,
+            type: typeMap[item.action_type] || 'manual_section',
+            snippet: item.snippet_text,
+            content: item.ai_reply,
+          }),
+        }
+      );
+      const data = await res.json();
+      if (res.ok) {
+        createdEntries.push({
+          id: data.id,
+          title: data.title,
+          type: data.type,
+          snippet: data.snippet,
+          content: data.content,
+          image_url: data.image_url,
+          style: data.style,
+          createdAt: new Date(data.created_at).toLocaleString(),
+        });
+      }
+    }
+
+    setLessons(prev => prev.map(l =>
+      l.id === targetLessonId ? { ...l, entries: [...l.entries, ...createdEntries] } : l
+    ));
+
+    setIsSelectingSnippets(false);
+    setSelectedSnippetIds(new Set());
+  } catch (err) {
+    console.error("Failed to add snippets to session:", err);
+    alert("Failed to add snippets to the session.");
+  } finally {
+    setSessionPickerOpen(false);
+  }
+};
+
+
 
   const activeLesson = lessons.find(l => l.id === selectedLessonId);
   const lessonDocuments = documents.filter(doc => doc.lesson_id === selectedLessonId);
@@ -184,71 +265,200 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
     loadSavedItems();
   }, [projectId]);
 
-  // --- HANDLER: CREATE NEW LESSON ---
-  const handleCreateLesson = () => {
-    if (!newLessonTitle.trim()) return;
-    const newLesson: Lesson = {
-      id: `lesson-${Date.now()}`,
-      title: newLessonTitle.trim(),
-      description: `Created on ${new Date().toLocaleDateString()}`,
-      entries: []
+
+
+  useEffect(() => {
+    const loadLessons = async () => {
+      setIsLoadingLessons(true);
+      try {
+        const res = await fetch(`http://localhost:8000/api/projects/${projectId}/study/lessons`);
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          setLessons(data.map((l: any) => ({ ...l, entries: [] })));
+          if (data.length > 0) {
+            setSelectedLessonId(data[0].id);
+          }
+        }
+      } catch (err) {
+        console.error("Failed to load lessons:", err);
+      } finally {
+        setIsLoadingLessons(false);
+      }
     };
-    setLessons(prev => [...prev, newLesson]);
-    setSelectedLessonId(newLesson.id);
-    setNewLessonTitle('');
+    loadLessons();
+  }, [projectId]);
+
+
+
+  // NEW: fetch this lesson's real saved entries from the backend when it's opened
+useEffect(() => {
+  if (!selectedLessonId) return;
+
+  const loadEntries = async () => {
+    try {
+      const res = await fetch(
+        `http://localhost:8000/api/projects/${projectId}/study/lessons/${selectedLessonId}/entries`
+      );
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        setLessons(prev => prev.map(l =>
+          l.id === selectedLessonId
+            ? {
+                ...l,
+                entries: data.map((e: any) => ({
+                  id: e.id,
+                  title: e.title,
+                  type: e.type,
+                  snippet: e.snippet,
+                  content: e.content,
+                  image_url: e.image_url,
+                  style: e.style,
+                  createdAt: new Date(e.created_at).toLocaleString(),
+                })),
+              }
+            : l
+        ));
+      }
+    } catch (err) {
+      console.error("Failed to load lesson entries:", err);
+    }
   };
 
-  // --- HANDLER: ADD CUSTOM MANUAL SECTION ---
-  const handleAddManualSection = () => {
+  loadEntries();
+}, [selectedLessonId, projectId]);
+
+// --- HANDLER: CREATE NEW LESSON --- // CHANGED: now persists to backend
+  const handleCreateLesson = async () => {
+    if (!newLessonTitle.trim()) return;
+
+    try {
+      const res = await fetch(
+        `http://localhost:8000/api/projects/${projectId}/study/lessons`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: newLessonTitle.trim(),
+            description: `Created on ${new Date().toLocaleDateString()}`,
+          }),
+        }
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Failed to create lesson");
+
+      const newLesson: Lesson = {
+        id: data.id,
+        title: data.title,
+        description: data.description,
+        entries: [],
+      };
+
+      setLessons(prev => [...prev, newLesson]);
+      setSelectedLessonId(newLesson.id);
+      setNewLessonTitle('');
+    } catch (err: any) {
+      console.error("Failed to create lesson:", err);
+      alert(`Failed to create lesson: ${err.message || "Unknown error"}`);
+    }
+  };
+
+  // --- HANDLER: ADD CUSTOM MANUAL SECTION --- // CHANGED: now persists to backend
+  const handleAddManualSection = async () => {
     if (!customSectionTitle.trim() || !customSectionContent.trim() || !selectedLessonId) {
       alert("Please enter a title and content for your section.");
       return;
     }
 
-    const newEntry: LessonEntry = {
-      id: `manual-${Date.now()}`,
-      title: customSectionTitle.trim(),
-      type: 'manual_section',
-      content: customSectionContent.trim(),
-      image_url: customSectionImageUrl || undefined,
-      style: {
-        isBold: customSectionBold,
-        isItalic: customSectionItalic,
-        fontSize: customSectionFontSize
-      },
-      createdAt: new Date().toLocaleString()
-    };
+    try {
+      const res = await fetch(
+        `http://localhost:8000/api/projects/${projectId}/study/lessons/${selectedLessonId}/entries`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: customSectionTitle.trim(),
+            type: 'manual_section',
+            content: customSectionContent.trim(),
+            image_url: customSectionImageUrl || null,
+            style: {
+              isBold: customSectionBold,
+              isItalic: customSectionItalic,
+              fontSize: customSectionFontSize,
+            },
+          }),
+        }
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Failed to save section");
 
-    setLessons(prev => prev.map(lesson => {
-      if (lesson.id === selectedLessonId) {
-        return { ...lesson, entries: [...lesson.entries, newEntry] };
-      }
-      return lesson;
-    }));
+      const newEntry: LessonEntry = {
+        id: data.id,
+        title: data.title,
+        type: data.type,
+        snippet: data.snippet,
+        content: data.content,
+        image_url: data.image_url,
+        style: data.style,
+        createdAt: new Date(data.created_at).toLocaleString(),
+      };
 
-    // Reset Modal Form
-    setCustomSectionTitle('');
-    setCustomSectionContent('');
-    setCustomSectionBold(false);
-    setCustomSectionItalic(false);
-    setCustomSectionFontSize('normal');
-    setCustomSectionImageUrl('');
-    setShowAddSectionModal(false);
+      setLessons(prev => prev.map(lesson => {
+        if (lesson.id === selectedLessonId) {
+          return { ...lesson, entries: [...lesson.entries, newEntry] };
+        }
+        return lesson;
+      }));
+
+      // Reset Modal Form
+      setCustomSectionTitle('');
+      setCustomSectionContent('');
+      setCustomSectionBold(false);
+      setCustomSectionItalic(false);
+      setCustomSectionFontSize('normal');
+      setCustomSectionImageUrl('');
+      setShowAddSectionModal(false);
+    } catch (err: any) {
+      console.error("Failed to save manual section:", err);
+      alert(`Failed to save section: ${err.message || "Unknown error"}`);
+    }
   };
 
   // --- HANDLER: SECTION IMAGE FILE ATTACH ---
-  const handleSectionImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+const MAX_SECTION_IMAGE_DIMENSION = 1200; // px, longest side
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      if (event.target?.result) {
-        setCustomSectionImageUrl(event.target.result as string);
+const handleSectionImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = (event) => {
+    const rawDataUrl = event.target?.result as string;
+    if (!rawDataUrl) return;
+
+    const img = new Image();
+    img.onload = () => {
+      let { width, height } = img;
+      if (width > MAX_SECTION_IMAGE_DIMENSION || height > MAX_SECTION_IMAGE_DIMENSION) {
+        const scale = MAX_SECTION_IMAGE_DIMENSION / Math.max(width, height);
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
       }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        setCustomSectionImageUrl(rawDataUrl); // fallback: use original if canvas fails
+        return;
+      }
+      ctx.drawImage(img, 0, 0, width, height);
+      setCustomSectionImageUrl(canvas.toDataURL('image/jpeg', 0.85));
     };
-    reader.readAsDataURL(file);
+    img.src = rawDataUrl;
   };
+  reader.readAsDataURL(file);
+};
 
   // --- HANDLER: UPLOAD PDF UNDER CURRENT LESSON ---
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -262,7 +472,7 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
 
     const formData = new FormData();
     formData.append("file", file);
-    formData.append("lesson_id", selectedLessonId);
+    formData.append("lesson_id", String(selectedLessonId));
 
     try {
       const response = await fetch(
@@ -296,59 +506,98 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
     e.target.value = '';
   };
 
-  // --- HANDLER: SAVE AI OUTPUT TO CURRENT LESSON ---
-  const handleSaveToLesson = () => {
+// --- HANDLER: SAVE AI OUTPUT TO CURRENT LESSON --- // CHANGED: now persists to backend
+  const handleSaveToLesson = async () => {
     if (!aiOutput || !selectedLessonId) return;
 
-    const entryType: 'summary' | 'explanation' | 'practice_qa' = 
+    const entryType: 'summary' | 'explanation' | 'practice_qa' =
       activeAction === 'summarize' ? 'summary' :
       activeAction === 'explain' ? 'explanation' : 'practice_qa';
 
-    const newEntry: LessonEntry = {
-      id: `entry-${Date.now()}`,
-      title: `${activeAction ? activeAction.toUpperCase() : 'NOTE'} - ${activeDocument?.name || 'General Context'}`,
-      type: entryType,
-      snippet: activeSnippet,
-      content: aiOutput,
-      createdAt: new Date().toLocaleString()
-    };
+    try {
+      const res = await fetch(
+        `http://localhost:8000/api/projects/${projectId}/study/lessons/${selectedLessonId}/entries`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: `${activeAction ? activeAction.toUpperCase() : 'NOTE'} - ${activeDocument?.name || 'General Context'}`,
+            type: entryType,
+            snippet: activeSnippet,
+            content: aiOutput,
+          }),
+        }
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Save failed");
 
-    setLessons(prev => prev.map(lesson => {
-      if (lesson.id === selectedLessonId) {
-        return { ...lesson, entries: [...lesson.entries, newEntry] };
-      }
-      return lesson;
-    }));
+      const newEntry: LessonEntry = {
+        id: data.id,
+        title: data.title,
+        type: data.type,
+        snippet: data.snippet,
+        content: data.content,
+        image_url: data.image_url,
+        style: data.style,
+        createdAt: new Date(data.created_at).toLocaleString(),
+      };
 
-    alert(`Saved to lesson "${activeLesson?.title}"!`);
+      setLessons(prev => prev.map(lesson => {
+        if (lesson.id === selectedLessonId) {
+          return { ...lesson, entries: [...lesson.entries, newEntry] };
+        }
+        return lesson;
+      }));
+
+      alert(`Saved to lesson "${activeLesson?.title}"!`);
+    } catch (err: any) {
+      console.error("Failed to save to lesson:", err);
+      alert(`Failed to save: ${err.message || "Unknown error"}`);
+    }
   };
 
   // --- HANDLER: EXPORT LESSON CONTENT OR SNIPPETS TO PDF ---
   const handleDownloadPdf = async (targetRef: React.RefObject<HTMLDivElement | null>, filenamePrefix: string) => {
-    if (!targetRef.current) return;
+  if (!targetRef.current) return;
 
-    setIsExportingPdf(true);
+  setIsExportingPdf(true);
 
-    try {
-      const html2pdf = (await import('html2pdf.js')).default;
-      const element = targetRef.current;
-      const opt = {
-        margin:       [0.4, 0.4, 0.4, 0.4],
-        filename:     `${filenamePrefix}_${activeLesson?.title.replace(/\s+/g, '_') || 'Lesson'}.pdf`,
-        image:        { type: 'jpeg', quality: 0.98 },
-        html2canvas:  { scale: 2, useCORS: true },
-        jsPDF:        { unit: 'in', format: 'letter', orientation: 'portrait' }
-      };
+  try {
+    const html2canvas = (await import('html2canvas-pro')).default;
+    const { jsPDF } = await import('jspdf');
 
-      await html2pdf().set(opt).from(element).save();
-    } catch (err) {
-      console.error("PDF Export error:", err);
-      alert("Failed to export PDF. Ensure html2pdf.js is installed.");
-    } finally {
-      setIsExportingPdf(false);
+    const element = targetRef.current;
+    const canvas = await html2canvas(element, { scale: 2, useCORS: true });
+    const imgData = canvas.toDataURL('image/jpeg', 0.98);
+
+    const pdf = new jsPDF({ unit: 'in', format: 'letter', orientation: 'portrait' });
+    const pageWidth = pdf.internal.pageSize.getWidth() - 0.8;
+    const pageHeight = pdf.internal.pageSize.getHeight() - 0.8;
+
+    const imgWidth = pageWidth;
+    const imgHeight = (canvas.height * imgWidth) / canvas.width;
+
+    let heightLeft = imgHeight;
+    let position = 0.4;
+
+    pdf.addImage(imgData, 'JPEG', 0.4, position, imgWidth, imgHeight);
+    heightLeft -= pageHeight;
+
+    while (heightLeft > 0) {
+      position = heightLeft - imgHeight - 0.4;
+      pdf.addPage();
+      pdf.addImage(imgData, 'JPEG', 0.4, position, imgWidth, imgHeight);
+      heightLeft -= pageHeight;
     }
-  };
 
+    pdf.save(`${filenamePrefix}_${activeLesson?.title.replace(/\s+/g, '_') || 'Lesson'}.pdf`);
+  } catch (err) {
+    console.error("PDF Export error:", err);
+    alert("Failed to export PDF.");
+  } finally {
+    setIsExportingPdf(false);
+  }
+};
   // --- HANDLER: TEXT HIGHLIGHT CAPTURE ---
   const handleTextSelection = () => {
     if (selectionMode !== 'text') return;
@@ -581,6 +830,16 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
       setIsAiTyping(false);
     }
   };
+  
+
+const [includeSourceInExport, setIncludeSourceInExport] = useState(false); // NEW
+
+const handleDownloadLessonPdf = async () => { // NEW
+  setIncludeSourceInExport(true);
+  await new Promise(resolve => setTimeout(resolve, 100)); // let React render the appended pages first
+  await handleDownloadPdf(lessonPdfExportRef, `Lesson_Summary`);
+  setIncludeSourceInExport(false);
+};
 
   const handleCopyOutput = () => {
     navigator.clipboard.writeText(aiOutput);
@@ -833,28 +1092,38 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
                       </button>
                       <button
                         type="button"
-                        onClick={() => handleDownloadPdf(lessonPdfExportRef, `Lesson_Summary`)}
+                        onClick={handleDownloadLessonPdf}   // CHANGED: routes through the source-doc-inclusion wrapper
                         disabled={isExportingPdf || !activeLesson?.entries.length}
                         className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5"
                       >
-                        {isExportingPdf ? 'Generating PDF...' : '📄 Download PDF'}
+                       {isExportingPdf ? 'Generating PDF...' : '📄 Download PDF'}
                       </button>
                     </div>
                   </div>
 
                   <div className="grid grid-cols-2 gap-2">
                     {/* Select / Open Existing Lesson */}
-                    <select
-                      value={selectedLessonId}
-                      onChange={(e) => setSelectedLessonId(e.target.value)}
-                      className="bg-slate-900 border border-slate-800 text-xs text-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500/50"
-                    >
-                      {lessons.map(l => (
-                        <option key={l.id} value={l.id}>
-                          Open: {l.title} ({l.entries.length} saved)
-                        </option>
-                      ))}
-                    </select>
+                    {isLoadingLessons ? (
+                      <div className="bg-slate-900 border border-slate-800 text-xs text-slate-500 italic rounded-lg px-3 py-2">
+                        Loading sessions...
+                      </div>
+                    ) : lessons.length === 0 ? (
+                      <div className="bg-slate-900 border border-slate-800 text-xs text-slate-500 italic rounded-lg px-3 py-2">
+                        No sessions yet — create one →
+                      </div>
+                    ) : (
+                      <select
+                        value={selectedLessonId ?? ''}
+                        onChange={(e) => setSelectedLessonId(e.target.value ? Number(e.target.value) : null)}
+                        className="bg-slate-900 border border-slate-800 text-xs text-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500/50"
+                      >
+                        {lessons.map(l => (
+                          <option key={l.id} value={l.id}>
+                            Open: {l.title} ({l.entries.length} saved)
+                          </option>
+                        ))}
+                      </select>
+                    )}
 
                     {/* Create New Lesson */}
                     <div className="flex gap-1">
@@ -863,6 +1132,9 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
                         value={newLessonTitle}
                         onChange={(e) => setNewLessonTitle(e.target.value)}
                         placeholder="New Lesson Title..."
+                        //so no pop up can appear
+                        autoComplete="off"
+                        data-lpignore="true"
                         className="flex-1 bg-slate-900 border border-slate-800 text-xs text-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-blue-500/50"
                       />
                       <button
@@ -900,6 +1172,9 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
                           value={customSectionTitle}
                           onChange={(e) => setCustomSectionTitle(e.target.value)}
                           placeholder="e.g. My Personal Summary or Key Equations"
+                           //so no pop up can appear
+                          autoComplete="off"
+                          data-lpignore="true"
                           className="w-full bg-slate-950 border border-slate-800 text-xs text-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
                         />
                       </div>
@@ -942,15 +1217,15 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
                       {/* Content Area */}
                       <div>
                         <label className="text-[11px] font-bold text-slate-400 uppercase block mb-1">Content / Written Notes</label>
-                        <textarea
-                          rows={4}
-                          value={customSectionContent}
-                          onChange={(e) => setCustomSectionContent(e.target.value)}
-                          placeholder="Write your study notes or explanation here..."
-                          className={`w-full bg-slate-950 border border-slate-800 text-slate-200 rounded-lg p-3 focus:outline-none focus:border-blue-500 ${
-                            customSectionBold ? 'font-bold' : ''
-                          } ${customSectionItalic ? 'italic' : ''}`}
-                        />
+                     <textarea
+                       rows={4}
+                       value={customSectionContent}
+                       onChange={(e) => setCustomSectionContent(e.target.value)}
+                       placeholder="Write your study notes or explanation here..."
+                       className={`w-full bg-slate-950 border border-slate-800 text-slate-200 rounded-lg p-3 focus:outline-none focus:border-blue-500 ${getFontSizeClass(customSectionFontSize)} ${
+                       customSectionBold ? 'font-bold' : ''
+                       } ${customSectionItalic ? 'italic' : ''}`}
+                      />
                       </div>
 
                       {/* Image Embed Options */}
@@ -962,6 +1237,9 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
                             value={customSectionImageUrl}
                             onChange={(e) => setCustomSectionImageUrl(e.target.value)}
                             placeholder="Image URL or upload local file..."
+                             //so no pop up can appear
+                            autoComplete="off"
+                            data-lpignore="true"
                             className="flex-1 bg-slate-950 border border-slate-800 text-xs text-slate-200 rounded-lg px-3 py-1.5 focus:outline-none focus:border-blue-500"
                           />
                           <button
@@ -1008,6 +1286,22 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
                     <span className="text-[10px] uppercase font-bold tracking-widest text-blue-400 block">LESSON SUMMARY REPORT</span>
                     <h1 className="text-xl font-black text-white mt-1">{activeLesson?.title || 'Selected Lesson'}</h1>
                     <p className="text-xs text-slate-400 mt-1">{projectName} • Practice Questions, Explanations & Written Sections</p>
+
+                      {/* NEW: highlighted source-document badges */}
+                      {lessonDocuments.length > 0 && (
+                       <div className="mt-3 flex flex-wrap gap-2">
+                       {lessonDocuments.map(doc => (
+                        <span
+                         key={doc.id}
+                         className="text-[10px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40 px-2.5 py-1 rounded-full"
+                        >
+                       📎 {doc.name}
+                     </span>
+                     ))}
+                   </div>
+                  )}
+
+
                   </div>
 
                   {!activeLesson?.entries.length ? (
@@ -1044,6 +1338,34 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
                       </div>
                     ))
                   )}
+
+
+                              {/* ↓↓↓ PASTE THE NEW SOURCE-DOCUMENT BLOCK RIGHT HERE ↓↓↓ */}
+                  {/* NEW: source document pages, only rendered during export (see includeSourceInExport) */}
+                  {includeSourceInExport && lessonDocuments.length > 0 && (
+                    <div className="mt-6 pt-6 border-t-2 border-blue-500/30">
+                      <span className="text-[10px] uppercase font-bold tracking-widest text-blue-400 block mb-3">
+                        SOURCE DOCUMENT{lessonDocuments.length > 1 ? 'S' : ''}
+                      </span>
+                      {lessonDocuments.map(doc => (
+                        <div key={doc.id} className="mb-4">
+                          <div className="text-xs font-bold text-amber-400 mb-2">📎 {doc.name}</div>
+                          {(doc.page_images || []).map(img => (
+                            <div key={img.page} className="mb-3 border border-slate-800 rounded-lg overflow-hidden">
+                              <img
+                                src={`data:image/png;base64,${img.image_base64}`}
+                                alt={`${doc.name} page ${img.page}`}
+                                className="w-full h-auto"
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {/* ↑↑↑ END NEW BLOCK ↑↑↑ */}
+
+
                 </div>
               </div>
             )}
@@ -1194,6 +1516,9 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
                       value={chatInput}
                       onChange={(e) => setChatInput(e.target.value)}
                       placeholder={`Ask ${selectedAI} about this document...`}
+                       //so no pop up can appear
+                      autoComplete="off"
+                      data-lpignore="true"
                       className="flex-1 bg-slate-950 border border-slate-800 text-xs text-slate-200 rounded-lg px-3 py-2.5 focus:outline-none focus:border-blue-500/50 placeholder:text-slate-600"
                     />
                     <button
@@ -1212,19 +1537,63 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
             {/* SAVED SNIPPETS VIEW WITH PDF EXPORT */}
             {activeTab === 'notes' && (
               <div className="space-y-4 overflow-y-auto flex-1">
-                <div className="flex items-center justify-between">
-                  <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                    Saved Snippets ({activeLesson?.title || 'All'})
-                  </h2>
-                  <button
-                    type="button"
-                    onClick={() => handleDownloadPdf(snippetsPdfExportRef, `Snippets_Report`)}
-                    disabled={isExportingPdf || currentLessonSavedItems.length === 0}
-                    className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors"
-                  >
-                    Export Snippets PDF
-                  </button>
-                </div>
+                <div className="flex items-center justify-between flex-wrap gap-2">
+  <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400">
+    Saved Snippets ({activeLesson?.title || 'All'})
+  </h2>
+  <div className="flex items-center gap-2 flex-wrap">
+    <button
+      type="button"
+      onClick={() => {
+        setIsSelectingSnippets(prev => !prev);
+        setSelectedSnippetIds(new Set());
+      }}
+      className={`text-xs font-semibold px-3 py-1.5 rounded-lg border transition-colors ${
+        isSelectingSnippets
+          ? 'bg-blue-600/30 text-blue-300 border-blue-500/40'
+          : 'bg-slate-900 text-slate-300 border-slate-800 hover:bg-slate-800'
+      }`}
+    >
+      {isSelectingSnippets ? 'Cancel Select' : 'Select'}
+    </button>
+
+    {isSelectingSnippets && selectedSnippetIds.size > 0 && (
+      <button
+        type="button"
+        onClick={() => {
+        setSessionPickerTargetIds(Array.from(selectedSnippetIds));
+        setSessionPickerChoice(selectedLessonId ? String(selectedLessonId) : '');
+        setSessionPickerOpen(true);
+        }}
+        className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors"
+      >
+        Add Selected ({selectedSnippetIds.size}) to Session
+      </button>
+    )}
+
+    <button
+      type="button"
+      onClick={() => {
+        setSessionPickerTargetIds(currentLessonSavedItems.map(item => item.id));
+        setSessionPickerChoice(selectedLessonId ? String(selectedLessonId) : '');
+        setSessionPickerOpen(true);
+      }}
+      disabled={currentLessonSavedItems.length === 0}
+      className="bg-purple-900/40 text-purple-300 hover:bg-purple-900/60 border border-purple-500/30 disabled:opacity-50 text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors"
+    >
+      Add All to Session
+    </button>
+
+    <button
+      type="button"
+      onClick={() => handleDownloadPdf(snippetsPdfExportRef, `Snippets_Report`)}
+      disabled={isExportingPdf || currentLessonSavedItems.length === 0}
+      className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors"
+    >
+      Export Snippets PDF
+    </button>
+  </div>
+</div>
 
                 <div ref={snippetsPdfExportRef} className="space-y-4 bg-slate-950 p-4 rounded-xl border border-slate-800">
                   <div className="border-b border-blue-500/40 pb-3 mb-2">
@@ -1245,11 +1614,27 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
                     currentLessonSavedItems.map((item) => (
                       <div key={item.id} className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-2">
                         <div className="flex items-center justify-between text-[10px] text-slate-400">
-                          <span className="uppercase font-bold text-blue-400">
-                            {item.action_type} ({item.engine})
-                          </span>
-                          <span>{new Date(item.created_at).toLocaleDateString()}</span>
-                        </div>
+  <div className="flex items-center gap-2">
+    {isSelectingSnippets && (
+      <input
+        type="checkbox"
+        checked={selectedSnippetIds.has(item.id)}
+        onChange={() => {
+          setSelectedSnippetIds(prev => {
+            const next = new Set(prev);
+            if (next.has(item.id)) next.delete(item.id);
+            else next.add(item.id);
+            return next;
+          });
+        }}
+      />
+    )}
+    <span className="uppercase font-bold text-blue-400">
+      {item.action_type} ({item.engine})
+    </span>
+  </div>
+  <span>{new Date(item.created_at).toLocaleDateString()}</span>
+</div>
                         {item.document_name && (
                           <div className="text-[10px] text-slate-500">Document: {item.document_name}</div>
                         )}
@@ -1269,6 +1654,53 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
         </section>
 
       </div>
+       {/* === SNIPPET-TO-SESSION 2c: session picker modal (sits at root level, after the 2-panel workspace) === */}
+      {sessionPickerOpen && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 max-w-sm w-full space-y-4 shadow-2xl">
+            <div className="flex justify-between items-center border-b border-slate-800 pb-2">
+              <h3 className="text-sm font-bold text-white">
+                Add {sessionPickerTargetIds.length} snippet{sessionPickerTargetIds.length !== 1 ? 's' : ''} to session
+              </h3>
+              <button onClick={() => setSessionPickerOpen(false)} className="text-slate-400 hover:text-white text-sm">✕</button>
+            </div>
+
+            <div>
+              <label className="text-[11px] font-bold text-slate-400 uppercase block mb-1">Target Session</label>
+              <select
+                value={sessionPickerChoice}
+                onChange={(e) => setSessionPickerChoice(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-800 text-xs text-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500"
+              >
+                {lessons.map(l => (
+                  <option key={l.id} value={l.id}>{l.title}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setSessionPickerOpen(false)}
+                className="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs px-4 py-2 rounded-lg font-semibold"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmAddToSession}   // CHANGED: was the no-op stub
+                className="bg-blue-600 hover:bg-blue-500 text-white text-xs px-4 py-2 rounded-lg font-semibold"
+              >
+              Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* === END SNIPPET-TO-SESSION 2c === */}
+
     </div>
   );
 }
+    
+     
