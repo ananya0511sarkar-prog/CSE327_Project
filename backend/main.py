@@ -4,11 +4,12 @@ import json
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends,Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from sqlalchemy import Boolean
 from typing import Optional, Dict, Any
-from sqlalchemy import Column, String, Integer, select
+from sqlalchemy import Column, String, Integer, select,Float,or_
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from passlib.context import CryptContext
@@ -1105,3 +1106,556 @@ async def create_lesson_entry(
         created_at=new_entry.created_at
     )
 # === END LESSONS BACKEND: endpoints ===
+
+
+# ─── EXPERT DASHBOARD DATABASE MODELS ───────────────────────────────
+class ExpertProfileDB(Base):
+    __tablename__ = "expert_profiles"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
+    name = Column(String, nullable=False)
+    email = Column(String, nullable=False)
+    role = Column(String, nullable=False)
+    company = Column(String, nullable=False)
+    avatar = Column(String, nullable=True)
+    price_bdt = Column(Integer, default=5000)
+    bio = Column(String, nullable=True)
+    skills = Column(ARRAY(String), nullable=True, default=list)
+
+
+class ExpertSlotDB(Base):
+    __tablename__ = "expert_slots"
+    id = Column(Integer, primary_key=True, index=True)
+    expert_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    date = Column(String, nullable=False)
+    time = Column(String, nullable=False)
+    duration = Column(String, default="45 Mins")
+    is_booked = Column(Boolean, default=False)
+
+
+class ExpertBookingDB(Base):
+    __tablename__ = "expert_bookings"
+    id = Column(Integer, primary_key=True, index=True)
+    expert_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    candidate_name = Column(String, nullable=False)
+    candidate_email = Column(String, nullable=False)
+    target_role = Column(String, nullable=False)
+    date = Column(String, nullable=False)
+    time = Column(String, nullable=False)
+    status = Column(String, default="Upcoming")
+    meeting_url = Column(String, nullable=True)
+    fee_bdt = Column(Integer, default=0)
+
+
+class ExpertWalletDB(Base):
+    __tablename__ = "expert_wallets"
+    id = Column(Integer, primary_key=True, index=True)
+    expert_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
+    total_earned_bdt = Column(Integer, default=0)
+    available_withdraw_bdt = Column(Integer, default=0)
+    pending_bdt = Column(Integer, default=0)
+
+
+# ─── EXPERT SCHEMAS ─────────────────────────────────────────────────
+class ExpertProfileSchema(BaseModel):
+    name: str
+    email: str
+    role: str
+    company: str
+    avatar: Optional[str] = None
+    priceBDT: int
+    bio: str
+    skills: list[str] = []
+
+
+class CreateSlotSchema(BaseModel):
+    date: str
+    time: str
+    duration: Optional[str] = "45 Mins"
+
+
+class PayoutRequestSchema(BaseModel):
+    amount: int
+
+
+# ─── EXPERT & AUTH ENDPOINTS ─────────────────────────────────────────
+@app.post("/api/auth/logout")
+async def logout():
+    return {"success": True, "message": "Logged out successfully"}
+
+
+@app.get("/api/expert/profile")
+async def get_expert_profile(
+    db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    result = await db.execute(
+        select(ExpertProfileDB).where(ExpertProfileDB.user_id == current_user.id)
+    )
+    profile = result.scalar_one_or_none()
+    if not profile:
+        return {}
+
+    return {
+        "name": profile.name,
+        "email": profile.email,
+        "role": profile.role,
+        "company": profile.company,
+        "avatar": profile.avatar,
+        "priceBDT": profile.price_bdt,
+        "bio": profile.bio,
+        "skills": profile.skills or []
+    }
+
+
+@app.post("/api/expert/profile")
+async def create_expert_profile(
+    payload: ExpertProfileSchema,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    result = await db.execute(
+        select(ExpertProfileDB).where(ExpertProfileDB.user_id == current_user.id)
+    )
+    profile = result.scalar_one_or_none()
+
+    if profile:
+        profile.name = payload.name
+        profile.email = payload.email
+        profile.role = payload.role
+        profile.company = payload.company
+        profile.avatar = payload.avatar
+        profile.price_bdt = payload.priceBDT
+        profile.bio = payload.bio
+        profile.skills = payload.skills
+    else:
+        profile = ExpertProfileDB(
+            user_id=current_user.id,
+            name=payload.name,
+            email=payload.email,
+            role=payload.role,
+            company=payload.company,
+            avatar=payload.avatar,
+            price_bdt=payload.priceBDT,
+            bio=payload.bio,
+            skills=payload.skills
+        )
+        db.add(profile)
+
+    await db.commit()
+    await db.refresh(profile)
+
+    return {
+        "name": profile.name,
+        "email": profile.email,
+        "role": profile.role,
+        "company": profile.company,
+        "avatar": profile.avatar,
+        "priceBDT": profile.price_bdt,
+        "bio": profile.bio,
+        "skills": profile.skills or []
+    }
+
+
+@app.put("/api/expert/profile")
+async def update_expert_profile(
+    payload: ExpertProfileSchema,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    result = await db.execute(
+        select(ExpertProfileDB).where(ExpertProfileDB.user_id == current_user.id)
+    )
+    profile = result.scalar_one_or_none()
+
+    if not profile:
+        profile = ExpertProfileDB(
+            user_id=current_user.id,
+            name=payload.name,
+            email=payload.email,
+            role=payload.role,
+            company=payload.company,
+            avatar=payload.avatar,
+            price_bdt=payload.priceBDT,
+            bio=payload.bio,
+            skills=payload.skills
+        )
+        db.add(profile)
+    else:
+        profile.name = payload.name
+        profile.email = payload.email
+        profile.role = payload.role
+        profile.company = payload.company
+        profile.avatar = payload.avatar
+        profile.price_bdt = payload.priceBDT
+        profile.bio = payload.bio
+        profile.skills = payload.skills
+
+    await db.commit()
+    await db.refresh(profile)
+
+    return {
+        "name": profile.name,
+        "email": profile.email,
+        "role": profile.role,
+        "company": profile.company,
+        "avatar": profile.avatar,
+        "priceBDT": profile.price_bdt,
+        "bio": profile.bio,
+        "skills": profile.skills or []
+    }
+
+
+@app.post("/api/expert/upload-avatar")
+async def upload_expert_avatar(
+    avatar: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    file_bytes = await avatar.read()
+    encoded_img = base64.b64encode(file_bytes).decode("utf-8")
+    avatar_url = f"data:{avatar.content_type};base64,{encoded_img}"
+
+    result = await db.execute(
+        select(ExpertProfileDB).where(ExpertProfileDB.user_id == current_user.id)
+    )
+    profile = result.scalar_one_or_none()
+    if profile:
+        profile.avatar = avatar_url
+        await db.commit()
+
+    return {"avatarUrl": avatar_url}
+
+
+@app.get("/api/expert/slots")
+async def get_expert_slots(
+    db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    result = await db.execute(
+        select(ExpertSlotDB).where(ExpertSlotDB.expert_id == current_user.id)
+    )
+    slots = result.scalars().all()
+    return [
+        {
+            "id": slot.id,
+            "date": slot.date,
+            "time": slot.time,
+            "duration": slot.duration,
+            "isBooked": slot.is_booked
+        }
+        for slot in slots
+    ]
+
+
+@app.post("/api/expert/slots")
+async def add_expert_slot(
+    payload: CreateSlotSchema,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    new_slot = ExpertSlotDB(
+        expert_id=current_user.id,
+        date=payload.date,
+        time=payload.time,
+        duration=payload.duration or "45 Mins",
+        is_booked=False
+    )
+    db.add(new_slot)
+    await db.commit()
+    await db.refresh(new_slot)
+
+    return {
+        "id": new_slot.id,
+        "date": new_slot.date,
+        "time": new_slot.time,
+        "duration": new_slot.duration,
+        "isBooked": new_slot.is_booked
+    }
+
+
+@app.delete("/api/expert/slots/{slot_id}")
+async def remove_expert_slot(
+    slot_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    result = await db.execute(
+        select(ExpertSlotDB).where(
+            ExpertSlotDB.id == slot_id,
+            ExpertSlotDB.expert_id == current_user.id
+        )
+    )
+    slot = result.scalar_one_or_none()
+    if not slot:
+        raise HTTPException(status_code=404, detail="Slot not found")
+
+    await db.delete(slot)
+    await db.commit()
+    return {"success": True}
+
+
+@app.get("/api/expert/bookings")
+async def get_expert_bookings(
+    db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    result = await db.execute(
+        select(ExpertBookingDB).where(ExpertBookingDB.expert_id == current_user.id)
+    )
+    bookings = result.scalars().all()
+    return [
+        {
+            "id": b.id,
+            "candidateName": b.candidate_name,
+            "candidateEmail": b.candidate_email,
+            "targetRole": b.target_role,
+            "date": b.date,
+            "time": b.time,
+            "status": b.status,
+            "meetingUrl": b.meeting_url or "",
+            "feeBDT": b.fee_bdt
+        }
+        for b in bookings
+    ]
+
+
+@app.get("/api/expert/wallet")
+async def get_expert_wallet(
+    db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    result = await db.execute(
+        select(ExpertWalletDB).where(ExpertWalletDB.expert_id == current_user.id)
+    )
+    wallet = result.scalar_one_or_none()
+    if not wallet:
+        wallet = ExpertWalletDB(
+            expert_id=current_user.id,
+            total_earned_bdt=0,
+            available_withdraw_bdt=0,
+            pending_bdt=0
+        )
+        db.add(wallet)
+        await db.commit()
+        await db.refresh(wallet)
+
+    return {
+        "totalEarnedBDT": wallet.total_earned_bdt,
+        "availableWithdrawBDT": wallet.available_withdraw_bdt,
+        "pendingBDT": wallet.pending_bdt
+    }
+
+
+@app.post("/api/expert/payout")
+async def request_expert_payout(
+    payload: PayoutRequestSchema,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user)
+):
+    result = await db.execute(
+        select(ExpertWalletDB).where(ExpertWalletDB.expert_id == current_user.id)
+    )
+    wallet = result.scalar_one_or_none()
+    if not wallet or wallet.available_withdraw_bdt < payload.amount:
+        raise HTTPException(status_code=400, detail="Insufficient funds")
+
+    wallet.available_withdraw_bdt -= payload.amount
+    await db.commit()
+    return {"success": True}
+
+@app.get("/api/experts")
+async def get_all_experts(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(ExpertProfileDB))
+    profiles = result.scalars().all()
+    
+    return [
+        {
+            "id": profile.id,
+            "name": profile.name,
+            "role": profile.role,
+            "company": profile.company,
+            "avatar": profile.avatar or "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80",
+            "priceBDT": profile.price_bdt,
+            "bio": profile.bio or "",
+            "skills": profile.skills or [],
+            "rating": 5.0,
+            "reviewsCount": 0
+        }
+        for profile in profiles
+    ]
+@app.get("/api/experts/{expert_id}/slots")
+async def get_public_expert_slots(expert_id: int, db: AsyncSession = Depends(get_db)):
+    # 1. Look up ExpertProfile to resolve both profile.id and user_id
+    profile_res = await db.execute(
+        select(ExpertProfileDB).where(
+            or_(ExpertProfileDB.id == expert_id, ExpertProfileDB.user_id == expert_id)
+        )
+    )
+    profile = profile_res.scalar_one_or_none()
+
+    # 2. Build set of matching IDs (e.g. {1, 10})
+    target_ids = {expert_id}
+    if profile:
+        target_ids.add(profile.id)
+        target_ids.add(profile.user_id)
+
+    # 3. Query slots matching any of the resolved IDs
+    query = select(ExpertSlotDB).where(
+        ExpertSlotDB.expert_id.in_(list(target_ids))
+    )
+    result = await db.execute(query)
+    slots = result.scalars().all()
+
+    return [
+        {
+            "id": slot.id,
+            "date": str(slot.date),
+            "time": str(slot.time),
+            "duration": getattr(slot, "duration", None) or "45 Mins",
+            "isBooked": bool(getattr(slot, "is_booked", False))
+        }
+        for slot in slots
+        if not getattr(slot, "is_booked", False)
+    ]
+    
+class BookingDB(Base):
+    __tablename__ = "bookings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    student_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    expert_id = Column(Integer, ForeignKey("expert_profiles.id"), nullable=False)
+    amount = Column(Float, nullable=False)
+    currency = Column(String, default="BDT")
+    status = Column(String, default="CONFIRMED")
+    created_at = Column(DateTime, default=datetime.utcnow)
+from pydantic import BaseModel
+
+class PaymentConfirmSchema(BaseModel):
+    expert_id: int
+    amount: float
+    currency: str = "BDT"
+
+@app.post("/api/payment/confirm")
+async def confirm_payment(
+    data: PaymentConfirmSchema, 
+    db: AsyncSession = Depends(get_db),
+    current_user: UserDB = Depends(get_current_user) # Auth dependency to get student ID
+):
+    # 1. Create a new booking record in PostgreSQL
+    new_booking = BookingDB(
+        student_id=current_user.id,
+        expert_id=data.expert_id,
+        amount=data.amount,
+        currency=data.currency,
+        status="CONFIRMED"
+    )
+    
+    # 2. Persist to database
+    db.add(new_booking)
+    await db.commit()
+    await db.refresh(new_booking)
+    
+    return {
+        "message": "Payment confirmed and booking saved successfully",
+        "booking_id": new_booking.id,
+        "status": new_booking.status
+    }
+
+class CreateBookingPayload(BaseModel):
+    slot_id: int
+    expert_id: Optional[int] = None
+    target_role: Optional[str] = "Software Engineer"
+    candidate_name: Optional[str] = None
+    candidate_email: Optional[str] = None
+    fee_bdt: Optional[int] = 5000
+
+
+@app.post("/api/bookings")
+@app.post("/api/experts/{expert_id}/bookings")
+@app.post("/api/expert/bookings")
+async def create_expert_booking(
+    payload: CreateBookingPayload,
+    expert_id: Optional[int] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[UserDB] = Depends(get_current_user)
+):
+    target_id = expert_id or payload.expert_id
+
+    # 1. Fetch requested slot
+    slot_res = await db.execute(
+        select(ExpertSlotDB).where(ExpertSlotDB.id == payload.slot_id)
+    )
+    slot = slot_res.scalar_one_or_none()
+    if not slot:
+        raise HTTPException(status_code=404, detail="Selected slot not found")
+
+    if getattr(slot, "is_booked", False):
+        raise HTTPException(status_code=400, detail="This slot has already been booked")
+
+    # 2. Resolve target_id (Profile ID 1 -> User ID 10) for FK constraint
+    user_id_for_expert = slot.expert_id
+    if target_id:
+        profile_res = await db.execute(
+            select(ExpertProfileDB).where(
+                or_(ExpertProfileDB.id == target_id, ExpertProfileDB.user_id == target_id)
+            )
+        )
+        profile = profile_res.scalar_one_or_none()
+        if profile:
+            user_id_for_expert = profile.user_id
+
+    # 3. Determine candidate metadata
+    cand_name = payload.candidate_name or getattr(current_user, "full_name", None) or (current_user.email if current_user else "Student Candidate")
+    cand_email = payload.candidate_email or (current_user.email if current_user else "candidate@example.com")
+
+    # 4. Insert into expert_bookings table
+    new_booking = ExpertBookingDB(
+        expert_id=user_id_for_expert,  # Points to public.users(id)
+        candidate_name=cand_name,
+        candidate_email=cand_email,
+        target_role=payload.target_role or "Software Engineer",
+        date=str(slot.date),
+        time=str(slot.time),
+        status="Upcoming",
+        meeting_url="https://meet.jit.si/interviewx-session",
+        fee_bdt=payload.fee_bdt or 5000
+    )
+
+    # 5. Mark slot as booked
+    slot.is_booked = True
+
+    db.add(new_booking)
+    await db.commit()
+    await db.refresh(new_booking)
+
+    return {
+        "success": True,
+        "message": "Booking saved successfully",
+        "booking_id": new_booking.id
+    }
+
+@app.get("/api/candidate/bookings")
+async def get_bookings_by_candidate_email(
+    email: str = Query(..., description="Email address to match candidate bookings"),
+    db: AsyncSession = Depends(get_db)
+):
+    # Query database for bookings matching the provided candidate email
+    result = await db.execute(
+        select(ExpertBookingDB).where(ExpertBookingDB.candidate_email == email)
+    )
+    bookings = result.scalars().all()
+
+    if not bookings:
+        return {
+            "success": True,
+            "count": 0,
+            "message": f"No bookings found for email: {email}",
+            "bookings": []
+        }
+
+    return {
+        "success": True,
+        "count": len(bookings),
+        "bookings": bookings
+    }

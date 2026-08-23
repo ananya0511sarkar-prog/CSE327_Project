@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
@@ -35,150 +35,338 @@ interface Booking {
   feeBDT: number;
 }
 
+interface WalletBalance {
+  totalEarnedBDT: number;
+  availableWithdrawBDT: number;
+  pendingBDT: number;
+}
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
 export default function ExpertDashboardPage() {
   const router = useRouter();
-  
-  // Set 'schedule' as the default active tab
-  const [activeTab, setActiveTab] = useState<'schedule' | 'availability' | 'profile' | 'earnings'>('schedule');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // ─── EXPERT PROFILE STATE ──────────────────────────────────────
-  const [profile, setProfile] = useState<ExpertProfile>({
-    name: "Sarah Jenkins",
-    email: "sarah.jenkins@google.com",
-    role: "Senior Software Engineer",
-    company: "Google",
+  // ─── TABS & LOADING STATES ─────────────────────────────────────
+  const [activeTab, setActiveTab] = useState<'schedule' | 'availability' | 'profile' | 'create-profile' | 'earnings'>('schedule');
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [errorMsg, setErrorMsg] = useState<string>("");
+  const [profileSuccessMsg, setProfileSuccessMsg] = useState<string>("");
+  const [isUploading, setIsUploading] = useState<boolean>(false);
+  const [payoutRequested, setPayoutRequested] = useState<boolean>(false);
+
+  // ─── DYNAMIC STATES ────────────────────────────────────────────
+  const [profile, setProfile] = useState<ExpertProfile | null>(null);
+  const [balance, setBalance] = useState<WalletBalance | null>(null);
+  const [slots, setSlots] = useState<TimeSlot[]>([]);
+  const [bookings, setBookings] = useState<Booking[]>([]);
+
+  // ─── FORM INPUT STATES ─────────────────────────────────────────
+  const [skillInput, setSkillInput] = useState<string>("");
+  const [newSlotDate, setNewSlotDate] = useState<string>("");
+  const [newSlotTime, setNewSlotTime] = useState<string>("");
+
+  // ─── NEW PROFILE FORM STATE ────────────────────────────────────
+  const [createProfileData, setCreateProfileData] = useState<ExpertProfile>({
+    name: "",
+    email: "",
+    role: "",
+    company: "",
     avatar: "https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=150&auto=format&fit=crop&q=80",
-    priceBDT: 8500,
-    bio: "Ex-Meta, current Google Staff Engineer with 8+ years experience interviewing candidate software engineers.",
-    skills: ["System Design", "Data Structures", "Go & Java"]
+    priceBDT: 5000,
+    bio: "",
+    skills: []
   });
+  const [createSkillInput, setCreateSkillInput] = useState<string>("");
 
-  const [skillInput, setSkillInput] = useState("");
-  const [profileSuccessMsg, setProfileSuccessMsg] = useState("");
-  const [isUploading, setIsUploading] = useState(false);
+  // Helper function for Auth Headers
+  const getAuthHeaders = useCallback(() => {
+    const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+    return {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
+    };
+  }, []);
 
-  // ─── BALANCE & STATS STATE ─────────────────────────────────────
-  const [balance, setBalance] = useState({
-    totalEarnedBDT: 357000,
-    availableWithdrawBDT: 85000,
-    pendingBDT: 17000
-  });
-  const [payoutRequested, setPayoutRequested] = useState(false);
+  // ─── FETCH DASHBOARD DATA ─────────────────────────────────────
+  const fetchDashboardData = useCallback(async () => {
+    setIsLoading(true);
+    setErrorMsg("");
 
-  // ─── AVAILABILITY SLOTS STATE ──────────────────────────────────
-  const [slots, setSlots] = useState<TimeSlot[]>([
-    { id: 1, date: "2026-08-12", time: "04:00 PM", duration: "45 Mins", isBooked: true },
-    { id: 2, date: "2026-08-14", time: "06:00 PM", duration: "45 Mins", isBooked: false },
-    { id: 3, date: "2026-08-15", time: "02:00 PM", duration: "45 Mins", isBooked: false },
-  ]);
-
-  const [newSlotDate, setNewSlotDate] = useState("");
-  const [newSlotTime, setNewSlotTime] = useState("");
-
-  // ─── SCHEDULED BOOKINGS STATE ──────────────────────────────────
-  const [bookings] = useState<Booking[]>([
-    {
-      id: 101,
-      candidateName: "Rahul Dey",
-      candidateEmail: "rahul.dey.232@northsouth.edu",
-      targetRole: "Frontend Engineer (React / Next.js)",
-      date: "2026-08-12",
-      time: "04:00 PM EST",
-      status: "Upcoming",
-      meetingUrl: "https://meet.google.com/abc-defg-hij",
-      feeBDT: 8500
-    },
-    {
-      id: 102,
-      candidateName: "Ayesha Rahman",
-      candidateEmail: "ayesha.rahman@gmail.com",
-      targetRole: "Backend Engineer (Go)",
-      date: "2026-08-08",
-      time: "05:00 PM EST",
-      status: "Completed",
-      meetingUrl: "https://meet.google.com/xyz-uvwx-rst",
-      feeBDT: 8500
+    const token = localStorage.getItem("token");
+    if (!token) {
+      router.push("/login");
+      return;
     }
-  ]);
 
-  const handleLogout = () => {
-    localStorage.removeItem("token");
-    router.push("/login");
-  };
+    try {
+      const headers = getAuthHeaders();
 
-  // Profile Picture File Upload Handler
-  const handleImageFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setIsUploading(true);
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setProfile((prev) => ({ ...prev, avatar: reader.result as string }));
-        setIsUploading(false);
-        setProfileSuccessMsg("Profile picture updated!");
-        setTimeout(() => setProfileSuccessMsg(""), 3000);
-      };
-      reader.readAsDataURL(file);
+      const [profileRes, slotsRes, bookingsRes, walletRes] = await Promise.all([
+        fetch(`${API_BASE_URL}/api/expert/profile`, { headers }),
+        fetch(`${API_BASE_URL}/api/expert/slots`, { headers }),
+        fetch(`${API_BASE_URL}/api/expert/bookings`, { headers }),
+        fetch(`${API_BASE_URL}/api/expert/wallet`, { headers })
+      ]);
+
+      if (profileRes.status === 401 || walletRes.status === 401) {
+        localStorage.removeItem("token");
+        router.push("/login");
+        return;
+      }
+
+      if (profileRes.ok) {
+        const data = await profileRes.json();
+        if (data && Object.keys(data).length > 0) {
+          setProfile({
+            name: data.name || "",
+            email: data.email || "",
+            role: data.role || "",
+            company: data.company || "",
+            avatar: data.avatar || "/default-avatar.png",
+            priceBDT: data.priceBDT || 0,
+            bio: data.bio || "",
+            skills: data.skills || []
+          });
+        }
+      }
+
+      if (slotsRes.ok) {
+        const data = await slotsRes.json();
+        setSlots(data);
+      }
+
+      if (bookingsRes.ok) {
+        const data = await bookingsRes.json();
+        setBookings(data);
+      }
+
+      if (walletRes.ok) {
+        const data = await walletRes.json();
+        setBalance({
+          totalEarnedBDT: data.totalEarnedBDT || 0,
+          availableWithdrawBDT: data.availableWithdrawBDT || 0,
+          pendingBDT: data.pendingBDT || 0
+        });
+      }
+
+    } catch (err) {
+      console.error("Failed to load dashboard data:", err);
+      setErrorMsg("Could not connect to backend server. Please verify your connection.");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [getAuthHeaders, router]);
+
+  useEffect(() => {
+    fetchDashboardData();
+  }, [fetchDashboardData]);
+
+  // ─── HANDLERS ──────────────────────────────────────────────────
+
+  const handleLogout = async () => {
+    try {
+      await fetch(`${API_BASE_URL}/api/auth/logout`, {
+        method: "POST",
+        headers: getAuthHeaders()
+      });
+    } catch (e) {
+      console.error("Logout error", e);
+    } finally {
+      localStorage.removeItem("token");
+      router.push("/login");
     }
   };
 
-  const handleTriggerFileInput = () => {
-    fileInputRef.current?.click();
-  };
-
-  const handleSaveProfile = (e: React.FormEvent) => {
+  // CREATE NEW PROFILE SUBMIT HANDLER
+  const handleCreateProfileSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setProfileSuccessMsg("Profile details saved successfully!");
-    setTimeout(() => setProfileSuccessMsg(""), 3000);
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/expert/profile`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify(createProfileData)
+      });
+
+      if (!res.ok) throw new Error("Failed to create profile");
+
+      const newProfile = await res.json();
+      setProfile(newProfile);
+      setProfileSuccessMsg("Expert profile created successfully!");
+      setActiveTab('profile'); // Switch to profile view/edit tab
+      setTimeout(() => setProfileSuccessMsg(""), 4000);
+    } catch (err) {
+      alert("Error creating expert profile on backend.");
+    }
   };
 
+  const handleSaveProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!profile) return;
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/expert/profile`, {
+        method: "PUT",
+        headers: getAuthHeaders(),
+        body: JSON.stringify(profile)
+      });
+
+      if (!res.ok) throw new Error("Failed to save profile");
+
+      const updatedProfile = await res.json();
+      setProfile(updatedProfile);
+      setProfileSuccessMsg("Profile updated successfully!");
+      setTimeout(() => setProfileSuccessMsg(""), 3000);
+    } catch (err) {
+      alert("Error saving profile to backend.");
+    }
+  };
+
+  const handleAddSlot = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newSlotDate || !newSlotTime) return;
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/expert/slots`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          date: newSlotDate,
+          time: newSlotTime,
+          duration: "45 Mins"
+        })
+      });
+
+      if (!res.ok) throw new Error("Failed to add slot");
+
+      const createdSlot = await res.json();
+      setSlots((prev) => [...prev, createdSlot]);
+      setNewSlotDate("");
+      setNewSlotTime("");
+    } catch (err) {
+      alert("Error creating availability slot.");
+    }
+  };
+
+  const handleRemoveSlot = async (id: number) => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/expert/slots/${id}`, {
+        method: "DELETE",
+        headers: getAuthHeaders()
+      });
+
+      if (!res.ok) throw new Error("Failed to remove slot");
+
+      setSlots((prev) => prev.filter(s => s.id !== id));
+    } catch (err) {
+      alert("Error deleting availability slot.");
+    }
+  };
+
+  const handleRequestPayout = async () => {
+    if (!balance || balance.availableWithdrawBDT <= 0) return;
+    setPayoutRequested(true);
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/expert/payout`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ amount: balance.availableWithdrawBDT })
+      });
+
+      if (!res.ok) throw new Error("Payout failed");
+
+      setBalance(prev => prev ? { ...prev, availableWithdrawBDT: 0 } : null);
+      alert("Payout request submitted successfully!");
+    } catch (err) {
+      alert("Failed to submit payout request.");
+    } finally {
+      setPayoutRequested(false);
+    }
+  };
+
+  const handleImageFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file && profile) {
+      setIsUploading(true);
+      const formData = new FormData();
+      formData.append("avatar", file);
+
+      try {
+        const token = localStorage.getItem("token");
+        const res = await fetch(`${API_BASE_URL}/api/expert/upload-avatar`, {
+          method: "POST",
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          body: formData
+        });
+
+        if (res.ok) {
+          const { avatarUrl } = await res.json();
+          setProfile({ ...profile, avatar: avatarUrl });
+          setProfileSuccessMsg("Profile picture uploaded!");
+          setTimeout(() => setProfileSuccessMsg(""), 3000);
+        }
+      } catch (err) {
+        alert("Image upload failed.");
+      } finally {
+        setIsUploading(false);
+      }
+    }
+  };
+
+  // Skill management for Update Profile
   const handleAddSkill = () => {
-    if (skillInput.trim() && !profile.skills.includes(skillInput.trim())) {
+    if (profile && skillInput.trim() && !profile.skills.includes(skillInput.trim())) {
       setProfile({ ...profile, skills: [...profile.skills, skillInput.trim()] });
       setSkillInput("");
     }
   };
 
   const handleRemoveSkill = (skillToRemove: string) => {
-    setProfile({ ...profile, skills: profile.skills.filter(s => s !== skillToRemove) });
+    if (profile) {
+      setProfile({ ...profile, skills: profile.skills.filter(s => s !== skillToRemove) });
+    }
   };
 
-  const handleAddSlot = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newSlotDate || !newSlotTime) return;
-
-    const newSlot: TimeSlot = {
-      id: Date.now(),
-      date: newSlotDate,
-      time: newSlotTime,
-      duration: "45 Mins",
-      isBooked: false
-    };
-
-    setSlots([...slots, newSlot]);
-    setNewSlotDate("");
-    setNewSlotTime("");
+  // Skill management for Create Profile
+  const handleAddCreateSkill = () => {
+    if (createSkillInput.trim() && !createProfileData.skills.includes(createSkillInput.trim())) {
+      setCreateProfileData({
+        ...createProfileData,
+        skills: [...createProfileData.skills, createSkillInput.trim()]
+      });
+      setCreateSkillInput("");
+    }
   };
 
-  const handleRemoveSlot = (id: number) => {
-    setSlots(slots.filter(s => s.id !== id));
+  const handleRemoveCreateSkill = (skillToRemove: string) => {
+    setCreateProfileData({
+      ...createProfileData,
+      skills: createProfileData.skills.filter(s => s !== skillToRemove)
+    });
   };
 
-  const handleRequestPayout = () => {
-    setPayoutRequested(true);
-    setTimeout(() => {
-      setBalance(prev => ({ ...prev, availableWithdrawBDT: 0 }));
-      setPayoutRequested(false);
-      alert("Payout request submitted! Funds will be transferred to your account within 24 hours.");
-    }, 1500);
-  };
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-slate-900 text-white flex flex-col items-center justify-center space-y-4 font-sans">
+        <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+        <p className="text-sm font-medium text-slate-400">Loading dynamic data from backend server...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans relative">
+      {errorMsg && (
+        <div className="bg-rose-600 text-white text-xs text-center py-2.5 font-bold shadow-md">
+          {errorMsg}
+        </div>
+      )}
+
       <div className="flex flex-1">
         
-        {/* ─── LEFT NAVIGATION SIDEBAR ─── */}
+        {/* SIDEBAR NAVIGATION */}
         <aside className="w-64 bg-[#0a0f1d] text-slate-300 flex flex-col justify-between p-5 shrink-0 border-r border-slate-800/40">
           <div>
             <div className="flex items-center gap-2 px-2 py-4 text-white text-2xl font-bold tracking-tight">
@@ -186,26 +374,20 @@ export default function ExpertDashboardPage() {
               <span className="font-serif tracking-normal text-white">InterviewX</span>
             </div>
             
-            {/* Expert Profile Card with Quick Avatar Edit Overlay */}
+            {/* Dynamic Profile Header */}
             <div className="flex flex-col items-center text-center my-6 px-2">
-              <div className="relative group cursor-pointer" onClick={handleTriggerFileInput}>
+              <div className="relative group cursor-pointer" onClick={() => fileInputRef.current?.click()}>
                 <img 
-                  src={profile.avatar} 
-                  alt={profile.name} 
+                  src={profile?.avatar || "/default-avatar.png"} 
+                  alt={profile?.name || "User Avatar"} 
                   className="w-16 h-16 rounded-full object-cover mb-2 border-2 border-blue-500 shadow-md group-hover:opacity-80 transition-opacity"
                 />
-                <div className="absolute inset-0 rounded-full bg-black/50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity mb-2">
-                  <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-                  </svg>
-                </div>
               </div>
 
               <h3 className="text-white font-bold text-sm tracking-wide break-all">
-                {profile.name}
+                {profile?.name || "No Profile Set"}
               </h3>
-              <p className="text-xs text-blue-400 font-medium mt-0.5">Verified Interviewer</p>
+              <p className="text-xs text-blue-400 font-medium mt-0.5">{profile?.role || "Verified Expert"}</p>
             </div>
 
             <div className="border-t border-slate-800/80 my-5"></div>
@@ -215,7 +397,6 @@ export default function ExpertDashboardPage() {
                 onClick={() => setActiveTab('schedule')}
                 className={`w-full flex items-center gap-3.5 px-4 py-3 rounded-xl font-medium text-sm transition-colors text-left ${activeTab === 'schedule' ? 'bg-[#162032] text-white font-semibold border border-slate-700/50 shadow-inner' : 'text-slate-300 hover:text-white hover:bg-slate-800/40'}`}
               >
-                <svg className="w-5 h-5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
                 Schedule & Bookings
               </button>
 
@@ -223,7 +404,6 @@ export default function ExpertDashboardPage() {
                 onClick={() => setActiveTab('availability')}
                 className={`w-full flex items-center gap-3.5 px-4 py-3 rounded-xl font-medium text-sm transition-colors text-left ${activeTab === 'availability' ? 'bg-[#162032] text-white font-semibold border border-slate-700/50 shadow-inner' : 'text-slate-300 hover:text-white hover:bg-slate-800/40'}`}
               >
-                <svg className="w-5 h-5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
                 Availability Slots
               </button>
 
@@ -231,7 +411,6 @@ export default function ExpertDashboardPage() {
                 onClick={() => setActiveTab('earnings')}
                 className={`w-full flex items-center gap-3.5 px-4 py-3 rounded-xl font-medium text-sm transition-colors text-left ${activeTab === 'earnings' ? 'bg-[#162032] text-white font-semibold border border-slate-700/50 shadow-inner' : 'text-slate-300 hover:text-white hover:bg-slate-800/40'}`}
               >
-                <svg className="w-5 h-5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
                 Wallet & Earnings
               </button>
 
@@ -239,8 +418,18 @@ export default function ExpertDashboardPage() {
                 onClick={() => setActiveTab('profile')}
                 className={`w-full flex items-center gap-3.5 px-4 py-3 rounded-xl font-medium text-sm transition-colors text-left ${activeTab === 'profile' ? 'bg-[#162032] text-white font-semibold border border-slate-700/50 shadow-inner' : 'text-slate-300 hover:text-white hover:bg-slate-800/40'}`}
               >
-                <svg className="w-5 h-5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
                 Expert Profile
+              </button>
+
+              {/* NEW TAB BUTTON: CREATE PROFILE */}
+              <button 
+                onClick={() => setActiveTab('create-profile')}
+                className={`w-full flex items-center gap-3.5 px-4 py-3 rounded-xl font-medium text-sm transition-colors text-left ${activeTab === 'create-profile' ? 'bg-[#162032] text-[#38bdf8] font-semibold border border-slate-700/50 shadow-inner' : 'text-emerald-400 hover:text-emerald-300 hover:bg-slate-800/40'}`}
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+                </svg>
+                + Create Profile
               </button>
             </nav>
           </div>
@@ -254,7 +443,6 @@ export default function ExpertDashboardPage() {
           </button>
         </aside>
 
-        {/* Hidden File Input for Image Upload */}
         <input 
           type="file" 
           ref={fileInputRef} 
@@ -263,76 +451,85 @@ export default function ExpertDashboardPage() {
           className="hidden" 
         />
 
-        {/* ─── MAIN WORKSPACE CONTENT ─── */}
+        {/* MAIN WORKSPACE */}
         <main className="flex-1 p-8 overflow-y-auto">
           
           {/* STATS BAR */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
             <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
               <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Available Balance</span>
-              <div className="text-2xl font-bold text-slate-900 mt-1">৳{balance.availableWithdrawBDT.toLocaleString()} <span className="text-xs font-normal text-slate-500">BDT</span></div>
+              <div className="text-2xl font-bold text-slate-900 mt-1">
+                ৳{(balance?.availableWithdrawBDT || 0).toLocaleString()} <span className="text-xs font-normal text-slate-500">BDT</span>
+              </div>
             </div>
 
             <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
               <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Total Earned</span>
-              <div className="text-2xl font-bold text-emerald-600 mt-1">৳{balance.totalEarnedBDT.toLocaleString()} <span className="text-xs font-normal text-slate-500">BDT</span></div>
+              <div className="text-2xl font-bold text-emerald-600 mt-1">
+                ৳{(balance?.totalEarnedBDT || 0).toLocaleString()} <span className="text-xs font-normal text-slate-500">BDT</span>
+              </div>
             </div>
 
             <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
               <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Upcoming Sessions</span>
-              <div className="text-2xl font-bold text-blue-600 mt-1">{bookings.filter(b => b.status === 'Upcoming').length}</div>
+              <div className="text-2xl font-bold text-blue-600 mt-1">
+                {bookings.filter(b => b.status === 'Upcoming').length}
+              </div>
             </div>
 
             <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
               <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Session Fee</span>
-              <div className="text-2xl font-bold text-slate-900 mt-1">৳{profile.priceBDT.toLocaleString()} <span className="text-xs font-normal text-slate-500">/ 45m</span></div>
+              <div className="text-2xl font-bold text-slate-900 mt-1">
+                ৳{(profile?.priceBDT || 0).toLocaleString()} <span className="text-xs font-normal text-slate-500">/ 45m</span>
+              </div>
             </div>
           </div>
 
-          {/* TAB 1: SCHEDULE & BOOKINGS (DEFAULT ACTIVE TAB) */}
+          {/* TAB 1: SCHEDULE & BOOKINGS */}
           {activeTab === 'schedule' && (
             <section className="space-y-6">
-              <div>
-                <h2 className="text-2xl font-bold text-slate-900">Your Session Schedule</h2>
-                <p className="text-slate-500 text-sm mt-0.5">Manage upcoming candidate mock interviews and past session records.</p>
-              </div>
+              <h2 className="text-2xl font-bold text-slate-900">Your Session Schedule</h2>
 
               <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
                 <div className="p-4 bg-slate-50 border-b border-slate-200 font-bold text-xs text-slate-600 uppercase tracking-wider">
                   Confirmed Bookings
                 </div>
 
-                <div className="divide-y divide-slate-100">
-                  {bookings.map((booking) => (
-                    <div key={booking.id} className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-slate-50/50 transition-colors">
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <h4 className="font-bold text-slate-900 text-base">{booking.candidateName}</h4>
-                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${booking.status === 'Upcoming' ? 'bg-blue-50 text-blue-700 border-blue-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
-                            {booking.status}
-                          </span>
+                {bookings.length === 0 ? (
+                  <div className="p-8 text-center text-slate-400 text-xs">No dynamic bookings found on the backend.</div>
+                ) : (
+                  <div className="divide-y divide-slate-100">
+                    {bookings.map((booking) => (
+                      <div key={booking.id} className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <h4 className="font-bold text-slate-900 text-base">{booking.candidateName}</h4>
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                              {booking.status}
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-500"><strong>Role:</strong> {booking.targetRole}</p>
+                          <p className="text-xs text-slate-400"><strong>Email:</strong> {booking.candidateEmail}</p>
+                          <p className="text-xs text-slate-600 font-mono mt-1">📅 {booking.date} at {booking.time}</p>
                         </div>
-                        <p className="text-xs text-slate-500"><strong className="text-slate-700">Role:</strong> {booking.targetRole}</p>
-                        <p className="text-xs text-slate-400"><strong className="text-slate-600">Email:</strong> {booking.candidateEmail}</p>
-                        <p className="text-xs text-slate-600 font-mono mt-1">📅 {booking.date} at {booking.time}</p>
-                      </div>
 
-                      <div className="flex items-center gap-3">
-                        <span className="font-bold text-slate-800 text-sm">৳{booking.feeBDT.toLocaleString()} BDT</span>
-                        {booking.status === 'Upcoming' && (
-                          <a 
-                            href={booking.meetingUrl} 
-                            target="_blank" 
-                            rel="noreferrer"
-                            className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs px-4 py-2 rounded-lg shadow-sm transition-colors"
-                          >
-                            Join Meeting Link
-                          </a>
-                        )}
+                        <div className="flex items-center gap-3">
+                          <span className="font-bold text-slate-800 text-sm">৳{booking.feeBDT?.toLocaleString()} BDT</span>
+                          {booking.meetingUrl && (
+                            <a 
+                              href={booking.meetingUrl} 
+                              target="_blank" 
+                              rel="noreferrer"
+                              className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs px-4 py-2 rounded-lg"
+                            >
+                              Join Link
+                            </a>
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </section>
           )}
@@ -340,10 +537,7 @@ export default function ExpertDashboardPage() {
           {/* TAB 2: AVAILABILITY SLOTS */}
           {activeTab === 'availability' && (
             <section className="space-y-6">
-              <div>
-                <h2 className="text-2xl font-bold text-slate-900">Manage Availability Slots</h2>
-                <p className="text-slate-500 text-sm mt-0.5">Publish time slots so candidates can book mock sessions directly on your calendar.</p>
-              </div>
+              <h2 className="text-2xl font-bold text-slate-900">Manage Availability Slots</h2>
 
               <form onSubmit={handleAddSlot} className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm flex flex-col sm:flex-row items-end gap-4">
                 <div className="flex-1 space-y-1">
@@ -353,7 +547,7 @@ export default function ExpertDashboardPage() {
                     required
                     value={newSlotDate}
                     onChange={(e) => setNewSlotDate(e.target.value)}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800 focus:outline-none focus:border-blue-500"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800"
                   />
                 </div>
 
@@ -365,13 +559,13 @@ export default function ExpertDashboardPage() {
                     placeholder="e.g., 04:00 PM EST"
                     value={newSlotTime}
                     onChange={(e) => setNewSlotTime(e.target.value)}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800 focus:outline-none focus:border-blue-500"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800"
                   />
                 </div>
 
                 <button 
                   type="submit"
-                  className="w-full sm:w-auto bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2.5 px-6 rounded-lg shadow-sm transition-colors"
+                  className="w-full sm:w-auto bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2.5 px-6 rounded-lg"
                 >
                   + Add Slot
                 </button>
@@ -381,11 +575,11 @@ export default function ExpertDashboardPage() {
                 <h3 className="text-sm font-bold text-slate-900 mb-4">Active Time Slots</h3>
                 
                 {slots.length === 0 ? (
-                  <p className="text-xs text-slate-400">No time slots added yet.</p>
+                  <p className="text-xs text-slate-400">No time slots found from backend.</p>
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
                     {slots.map((slot) => (
-                      <div key={slot.id} className={`p-4 rounded-xl border flex items-center justify-between ${slot.isBooked ? 'bg-slate-50 border-slate-200 opacity-60' : 'bg-white border-blue-200 shadow-sm'}`}>
+                      <div key={slot.id} className="p-4 rounded-xl border flex items-center justify-between bg-white border-blue-200 shadow-sm">
                         <div>
                           <div className="font-bold text-xs text-slate-900">{slot.date}</div>
                           <div className="text-xs text-blue-600 font-semibold mt-0.5">{slot.time} ({slot.duration})</div>
@@ -412,112 +606,176 @@ export default function ExpertDashboardPage() {
           {/* TAB 3: WALLET & EARNINGS */}
           {activeTab === 'earnings' && (
             <section className="space-y-6">
-              <div>
-                <h2 className="text-2xl font-bold text-slate-900">Wallet & Earnings Summary</h2>
-                <p className="text-slate-500 text-sm mt-0.5">Track your interview income and request bank transfers or mobile wallet payouts.</p>
-              </div>
+              <h2 className="text-2xl font-bold text-slate-900">Wallet & Earnings</h2>
 
-              <div className="bg-gradient-to-br from-slate-900 to-slate-950 text-white border border-slate-800 rounded-xl p-6 shadow-md flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
+              <div className="bg-slate-900 text-white border border-slate-800 rounded-xl p-6 shadow-md flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
                 <div>
                   <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Ready for Withdrawal</span>
-                  <div className="text-3xl font-extrabold text-white mt-1">৳{balance.availableWithdrawBDT.toLocaleString()} BDT</div>
-                  <p className="text-xs text-slate-400 mt-1">Direct payout via bKash, Nagad, or Bank Wire.</p>
+                  <div className="text-3xl font-extrabold text-white mt-1">
+                    ৳{(balance?.availableWithdrawBDT || 0).toLocaleString()} BDT
+                  </div>
                 </div>
 
                 <button 
                   type="button"
                   onClick={handleRequestPayout}
-                  disabled={balance.availableWithdrawBDT === 0 || payoutRequested}
-                  className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold text-xs py-3 px-6 rounded-lg shadow transition-colors"
+                  disabled={!balance || balance.availableWithdrawBDT <= 0 || payoutRequested}
+                  className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold text-xs py-3 px-6 rounded-lg transition-colors"
                 >
                   {payoutRequested ? 'Processing...' : 'Request Instant Payout'}
                 </button>
               </div>
-
-              <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-6">
-                <h3 className="text-sm font-bold text-slate-900 mb-4">Payout Ledger History</h3>
-                <div className="space-y-3 text-xs">
-                  <div className="flex justify-between py-2 border-b border-slate-100">
-                    <div>
-                      <span className="font-bold text-slate-800">Bank Transfer #8841</span>
-                      <p className="text-[11px] text-slate-400">August 02, 2026</p>
-                    </div>
-                    <span className="font-bold text-emerald-600">+ ৳170,000 BDT (Completed)</span>
-                  </div>
-
-                  <div className="flex justify-between py-2 border-b border-slate-100">
-                    <div>
-                      <span className="font-bold text-slate-800">bKash Merchant Payout</span>
-                      <p className="text-[11px] text-slate-400">July 20, 2026</p>
-                    </div>
-                    <span className="font-bold text-emerald-600">+ ৳102,000 BDT (Completed)</span>
-                  </div>
-                </div>
-              </div>
             </section>
           )}
 
-          {/* TAB 4: PROFILE SETTINGS & PHOTO UPLOAD */}
-          {activeTab === 'profile' && (
+          {/* NEW SECTION FORM: CREATE EXPERT PROFILE */}
+          {activeTab === 'create-profile' && (
             <section className="space-y-6">
               <div>
-                <h2 className="text-2xl font-bold text-slate-900">Update Expert Profile</h2>
-                <p className="text-slate-500 text-sm mt-0.5">Manage your photo, credentials, session pricing, and expertise tags.</p>
+                <h2 className="text-2xl font-bold text-slate-900">Create New Expert Profile</h2>
+                <p className="text-slate-500 text-sm mt-0.5">Fill in your professional details to set up your mock interviewer account.</p>
               </div>
 
+              <form onSubmit={handleCreateProfileSubmit} className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-slate-700">Full Name *</label>
+                    <input 
+                      type="text" 
+                      required
+                      placeholder="e.g. John Doe"
+                      value={createProfileData.name}
+                      onChange={(e) => setCreateProfileData({ ...createProfileData, name: e.target.value })}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-slate-700">Professional Email *</label>
+                    <input 
+                      type="email" 
+                      required
+                      placeholder="john@company.com"
+                      value={createProfileData.email}
+                      onChange={(e) => setCreateProfileData({ ...createProfileData, email: e.target.value })}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-slate-700">Current Job Title *</label>
+                    <input 
+                      type="text" 
+                      required
+                      placeholder="e.g. Senior Software Engineer"
+                      value={createProfileData.role}
+                      onChange={(e) => setCreateProfileData({ ...createProfileData, role: e.target.value })}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-slate-700">Company / Organization *</label>
+                    <input 
+                      type="text" 
+                      required
+                      placeholder="e.g. Google, Meta, Microsoft"
+                      value={createProfileData.company}
+                      onChange={(e) => setCreateProfileData({ ...createProfileData, company: e.target.value })}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-slate-700">Session Fee per 45 Mins (BDT) *</label>
+                    <input 
+                      type="number" 
+                      required
+                      min={1000}
+                      step={500}
+                      value={createProfileData.priceBDT}
+                      onChange={(e) => setCreateProfileData({ ...createProfileData, priceBDT: Number(e.target.value) })}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-slate-700">Avatar Image URL</label>
+                    <input 
+                      type="text" 
+                      placeholder="https://..."
+                      value={createProfileData.avatar}
+                      onChange={(e) => setCreateProfileData({ ...createProfileData, avatar: e.target.value })}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold text-slate-700">Short Bio / Interviewer Experience *</label>
+                  <textarea 
+                    rows={3}
+                    required
+                    placeholder="Describe your technical interviewing experience and domain expertise..."
+                    value={createProfileData.bio}
+                    onChange={(e) => setCreateProfileData({ ...createProfileData, bio: e.target.value })}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800 focus:outline-none focus:border-blue-500 resize-none leading-relaxed"
+                  />
+                </div>
+
+                {/* Expertise Skills */}
+                <div className="space-y-2">
+                  <label className="text-xs font-semibold text-slate-700">Expertise Tags</label>
+                  <div className="flex gap-2">
+                    <input 
+                      type="text" 
+                      placeholder="Add tag (e.g. System Design, React, Node.js)"
+                      value={createSkillInput}
+                      onChange={(e) => setCreateSkillInput(e.target.value)}
+                      className="flex-1 bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800 focus:outline-none focus:border-blue-500"
+                    />
+                    <button 
+                      type="button"
+                      onClick={handleAddCreateSkill}
+                      className="bg-slate-800 hover:bg-slate-900 text-white font-bold text-xs px-4 rounded-lg transition-colors"
+                    >
+                      Add Tag
+                    </button>
+                  </div>
+
+                  <div className="flex flex-wrap gap-1.5 pt-2">
+                    {createProfileData.skills.map((skill, idx) => (
+                      <span key={idx} className="bg-slate-100 border border-slate-200 text-slate-700 text-xs font-medium px-2.5 py-1 rounded-md flex items-center gap-1.5">
+                        {skill}
+                        <button type="button" onClick={() => handleRemoveCreateSkill(skill)} className="text-slate-400 hover:text-slate-700 font-bold">✕</button>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="pt-4 border-t border-slate-100 flex justify-end">
+                  <button 
+                    type="submit"
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-3 px-8 rounded-lg shadow-sm transition-colors"
+                  >
+                    Submit & Create Expert Profile
+                  </button>
+                </div>
+              </form>
+            </section>
+          )}
+
+          {/* TAB 4: UPDATE PROFILE SETTINGS */}
+          {activeTab === 'profile' && profile && (
+            <section className="space-y-6">
+              <h2 className="text-2xl font-bold text-slate-900">Update Expert Profile</h2>
+
               {profileSuccessMsg && (
-                <div className="bg-emerald-50 text-emerald-700 border border-emerald-200 p-3 rounded-lg text-xs font-bold flex items-center gap-2">
-                  <span>✓</span> {profileSuccessMsg}
+                <div className="bg-emerald-50 text-emerald-700 border border-emerald-200 p-3 rounded-lg text-xs font-bold">
+                  ✓ {profileSuccessMsg}
                 </div>
               )}
 
-              {/* PROFILE PICTURE UPDATE BOX */}
-              <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm">
-                <h3 className="text-sm font-bold text-slate-900 mb-1">Profile Photo</h3>
-                <p className="text-xs text-slate-500 mb-4">Upload a high-resolution professional headshot.</p>
-
-                <div className="flex flex-col sm:flex-row items-center gap-6">
-                  <div className="relative group">
-                    <img 
-                      src={profile.avatar} 
-                      alt={profile.name}
-                      className="w-24 h-24 rounded-full object-cover border-4 border-slate-100 shadow-md" 
-                    />
-                    {isUploading && (
-                      <div className="absolute inset-0 rounded-full bg-slate-900/60 flex items-center justify-center text-white text-xs">
-                        Uploading...
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="space-y-3 text-center sm:text-left">
-                    <div className="flex flex-wrap gap-2 justify-center sm:justify-start">
-                      <button 
-                        type="button"
-                        onClick={handleTriggerFileInput}
-                        className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs py-2 px-4 rounded-lg shadow-sm transition-colors flex items-center gap-2"
-                      >
-                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                        </svg>
-                        Upload Local File
-                      </button>
-
-                      <button 
-                        type="button"
-                        onClick={() => setProfile({ ...profile, avatar: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80" })}
-                        className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs py-2 px-3 rounded-lg transition-colors"
-                      >
-                        Reset Avatar
-                      </button>
-                    </div>
-
-                    <p className="text-[11px] text-slate-400">Supports JPG, PNG, or WebP. Max file size: 5MB.</p>
-                  </div>
-                </div>
-              </div>
-
-              {/* PROFILE FORM */}
               <form onSubmit={handleSaveProfile} className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm space-y-4">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-1">
@@ -526,7 +784,7 @@ export default function ExpertDashboardPage() {
                       type="text" 
                       value={profile.name}
                       onChange={(e) => setProfile({ ...profile, name: e.target.value })}
-                      className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800 focus:outline-none focus:border-blue-500"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800"
                     />
                   </div>
 
@@ -536,7 +794,7 @@ export default function ExpertDashboardPage() {
                       type="text" 
                       value={profile.role}
                       onChange={(e) => setProfile({ ...profile, role: e.target.value })}
-                      className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800 focus:outline-none focus:border-blue-500"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800"
                     />
                   </div>
 
@@ -546,7 +804,7 @@ export default function ExpertDashboardPage() {
                       type="text" 
                       value={profile.company}
                       onChange={(e) => setProfile({ ...profile, company: e.target.value })}
-                      className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800 focus:outline-none focus:border-blue-500"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800"
                     />
                   </div>
 
@@ -556,33 +814,21 @@ export default function ExpertDashboardPage() {
                       type="number" 
                       value={profile.priceBDT}
                       onChange={(e) => setProfile({ ...profile, priceBDT: Number(e.target.value) })}
-                      className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800 focus:outline-none focus:border-blue-500"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800"
                     />
                   </div>
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-700">Or Image Web URL</label>
-                  <input 
-                    type="text" 
-                    value={profile.avatar}
-                    onChange={(e) => setProfile({ ...profile, avatar: e.target.value })}
-                    placeholder="https://..."
-                    className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800 focus:outline-none focus:border-blue-500"
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-slate-700">Short Bio / Background</label>
+                  <label className="text-xs font-semibold text-slate-700">Short Bio</label>
                   <textarea 
                     rows={3}
                     value={profile.bio}
                     onChange={(e) => setProfile({ ...profile, bio: e.target.value })}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800 focus:outline-none focus:border-blue-500 resize-none leading-relaxed"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800"
                   />
                 </div>
 
-                {/* Skill Tags */}
                 <div className="space-y-2">
                   <label className="text-xs font-semibold text-slate-700">Expertise Tags</label>
                   <div className="flex gap-2">
@@ -591,12 +837,12 @@ export default function ExpertDashboardPage() {
                       placeholder="Add tag (e.g. System Design)"
                       value={skillInput}
                       onChange={(e) => setSkillInput(e.target.value)}
-                      className="flex-1 bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800 focus:outline-none focus:border-blue-500"
+                      className="flex-1 bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs text-slate-800"
                     />
                     <button 
                       type="button"
                       onClick={handleAddSkill}
-                      className="bg-slate-800 hover:bg-slate-900 text-white font-bold text-xs px-4 rounded-lg transition-colors"
+                      className="bg-slate-800 text-white font-bold text-xs px-4 rounded-lg"
                     >
                       Add
                     </button>
@@ -615,9 +861,9 @@ export default function ExpertDashboardPage() {
                 <div className="pt-4 border-t border-slate-100 flex justify-end">
                   <button 
                     type="submit"
-                    className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs py-2.5 px-6 rounded-lg shadow-sm transition-colors"
+                    className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs py-2.5 px-6 rounded-lg shadow-sm"
                   >
-                    Save Changes
+                    Save Changes to Backend
                   </button>
                 </div>
               </form>
@@ -627,13 +873,7 @@ export default function ExpertDashboardPage() {
         </main>
       </div>
 
-      {/* FOOTER GLOBAL BAR */}
-      <footer className="bg-slate-900 text-slate-400 border-t border-slate-800 py-6 text-center text-xs space-y-2">
-        <div className="flex justify-center gap-6 text-slate-300">
-          <Link href="#" className="hover:text-white transition-colors">About Us</Link>
-          <Link href="#" className="hover:text-white transition-colors">Terms of Service</Link>
-          <Link href="#" className="hover:text-white transition-colors">Privacy Policy</Link>
-        </div>
+      <footer className="bg-slate-900 text-slate-400 border-t border-slate-800 py-6 text-center text-xs">
         <div>Copyright © 2026 <span className="text-slate-300 font-medium">Interview Prep Platform</span>.</div>
       </footer>
     </div>
