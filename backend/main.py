@@ -31,6 +31,11 @@ import re             # NEW: used to detect (cid:N) glyph-garbage in pdfplumber 
 from docx import Document as DocxDocument   # NEW: python-docx — for .docx text extraction
 from pptx import Presentation               # NEW: python-pptx — for .pptx text extraction
 
+
+from fastapi import WebSocket, WebSocketDisconnect, HTTPException, Depends
+from typing import Dict, List
+from fastapi import WebSocket, WebSocketDisconnect
+
 # Load environment variables
 load_dotenv()
 
@@ -1659,3 +1664,80 @@ async def get_bookings_by_candidate_email(
         "count": len(bookings),
         "bookings": bookings
     }
+
+
+#video calling part
+
+
+# ─── WEBSOCKET ROOM MANAGER FOR WEBRTC SIGNALING ────────────────────────
+class ConnectionManager:
+    def __init__(self):
+        # Dictionary mapping booking_id (room) to a list of active websocket connections
+        self.active_rooms: Dict[int, List[WebSocket]] = {}
+
+    async def connect(self, websocket: WebSocket, room_id: int):
+        await websocket.accept()
+        if room_id not in self.active_rooms:
+            self.active_rooms[room_id] = []
+        self.active_rooms[room_id].append(websocket)
+
+    def disconnect(self, websocket: WebSocket, room_id: int):
+        if room_id in self.active_rooms:
+            if websocket in self.active_rooms[room_id]:
+                self.active_rooms[room_id].remove(websocket)
+            if not self.active_rooms[room_id]:
+                del self.active_rooms[room_id]
+
+    async def broadcast_to_others(self, websocket: WebSocket, room_id: int, message: str):
+        if room_id in self.active_rooms:
+            for connection in self.active_rooms[room_id]:
+                if connection != websocket:
+                    await connection.send_text(message)
+
+manager = ConnectionManager()
+
+# ─── WEBRTC SIGNALING WEBSOCKET ENDPOINT ────────────────────────────────
+@app.websocket("/api/ws/room/{booking_id}")
+async def websocket_signaling_endpoint(
+    websocket: WebSocket, 
+    booking_id: int,
+    user_email: str,       # Passed from frontend query params or token
+    user_id: int,          # Passed from frontend query params or token
+    is_expert: bool        # Boolean flag indicating user role type
+):
+    # 1. Verify booking existence and ownership using SQLAlchemy AsyncSession
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(ExpertBookingDB).where(ExpertBookingDB.id == booking_id)
+        )
+        booking = result.scalar_one_or_none()
+    
+    if not booking:
+        await websocket.close(code=4004, reason="Booking not found")
+        return
+
+    db_expert_id = booking.expert_id
+    db_candidate_email = booking.candidate_email
+
+    # 2. Check authorization rules
+    authorized = False
+    if is_expert and int(user_id) == int(db_expert_id):
+        authorized = True
+    elif not is_expert and user_email.lower().strip() == db_candidate_email.lower().strip():
+        authorized = True
+
+    if not authorized:
+        await websocket.close(code=4003, reason="Unauthorized access to this meeting room")
+        return
+
+    # 3. Accept and register connection to the room
+    await manager.connect(websocket, booking_id)
+    try:
+        while True:
+            # Receive WebRTC offer/answer/ICE candidate signals and broadcast to peer
+            data = await websocket.receive_text()
+            await manager.broadcast_to_others(websocket, booking_id, data)
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, booking_id)
+        # Notify other peer that user left
+        await manager.broadcast_to_others(websocket, booking_id, '{"type": "peer-disconnected"}')

@@ -515,15 +515,16 @@ export default function ExpertDashboardPage() {
 
                         <div className="flex items-center gap-3">
                           <span className="font-bold text-slate-800 text-sm">৳{booking.feeBDT?.toLocaleString()} BDT</span>
-                          {booking.meetingUrl && (
-                            <a 
-                              href={booking.meetingUrl} 
-                              target="_blank" 
-                              rel="noreferrer"
-                              className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs px-4 py-2 rounded-lg"
+                          
+                          {/* UPDATED: Join Video Room routing to /room/[id] */}
+                          {booking.status === 'Upcoming' && (
+                            <button 
+                              type="button"
+                              onClick={() => router.push(`/room/${booking.id}`)}
+                              className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2.5 rounded-lg shadow-sm flex items-center gap-1.5 transition-colors"
                             >
-                              Join Link
-                            </a>
+                              <span>📹 Join Video Room</span>
+                            </button>
                           )}
                         </div>
                       </div>

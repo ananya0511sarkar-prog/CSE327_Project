@@ -32,7 +32,6 @@ interface Booking {
   time: string;
   feeBDT: number;
   status: string;
-  meetingUrl?: string;
   expert: {
     name: string;
     role: string;
@@ -120,7 +119,7 @@ export default function MockInterviewsPage() {
     }
   }, [getAuthHeaders]);
 
-  // ─── FETCH MY BOOKINGS (USING NEW CANDIDATE EMAIL ENDPOINT) ────
+  // ─── FETCH MY BOOKINGS ────────────────────────────────────────
   const fetchMyBookings = useCallback(async () => {
     const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
     if (!token) return;
@@ -128,7 +127,6 @@ export default function MockInterviewsPage() {
     setIsLoadingBookings(true);
 
     try {
-      // Decode user email from JWT token payload or localStorage fallback
       let candidateEmail = "";
       try {
         const tokenPayload = JSON.parse(atob(token.split(".")[1]));
@@ -142,7 +140,6 @@ export default function MockInterviewsPage() {
         return;
       }
 
-      // Query the new endpoint filtering by candidate email
       const res = await fetch(
         `${API_BASE_URL}/api/candidate/bookings?email=${encodeURIComponent(candidateEmail)}`,
         {
@@ -153,12 +150,10 @@ export default function MockInterviewsPage() {
       if (res.ok) {
         const rawData = await res.json();
         
-        // Handle direct arrays or wrapped object responses
         const bookingsArray = Array.isArray(rawData)
           ? rawData
           : rawData.bookings || rawData.data || rawData.results || [];
 
-        // Map and normalize fields to handle camelCase and snake_case schema variations
         const normalizedBookings: Booking[] = bookingsArray.map((b: any) => ({
           id: b.id,
           targetRole: b.targetRole || b.target_role || "Software Engineer",
@@ -166,7 +161,6 @@ export default function MockInterviewsPage() {
           status: b.status || "Upcoming",
           date: b.date || b.slot?.date || b.slot_date || "Scheduled",
           time: b.time || b.slot?.time || b.slot_time || "TBD",
-          meetingUrl: b.meetingUrl || b.meeting_url || "",
           expert: {
             name: b.expert?.name || b.expertName || b.expert_name || "Verified Expert",
             role: b.expert?.role || b.expertRole || b.expert_role || "Technical Interviewer",
@@ -228,7 +222,7 @@ export default function MockInterviewsPage() {
     }
   };
 
-  // ─── BOOKING HANDLER (MATCHING BACKEND DATA FORMAT) ───────────
+  // ─── BOOKING HANDLER ──────────────────────────────────────────
   const handleConfirmBooking = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -542,24 +536,14 @@ export default function MockInterviewsPage() {
                         </div>
                       </div>
 
-                      {booking.meetingUrl ? (
-                        <a
-                          href={booking.meetingUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="block text-center w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs py-2 rounded-lg transition-colors"
-                        >
-                          Join Meeting
-                        </a>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => alert(`Meeting link will become active 10 mins prior to ${booking.date} ${booking.time}`)}
-                          className="w-full bg-slate-800 hover:bg-slate-900 text-white font-semibold text-xs py-2 rounded-lg transition-colors"
-                        >
-                          View Session Details
-                        </button>
-                      )}
+                      {/* Join Video Room Button (Routes to /room/[id]) */}
+                      <button
+                        type="button"
+                        onClick={() => router.push(`/room/${booking.id}`)}
+                        className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs py-2 rounded-lg transition-colors"
+                      >
+                        Join Video Room
+                      </button>
                     </div>
                   ))}
                 </div>
