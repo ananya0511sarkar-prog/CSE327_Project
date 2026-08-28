@@ -146,6 +146,7 @@ class StudyDocumentDB(Base):
     # PDF pages that needed the PyMuPDF render fallback (empty/cid-garbage text,
     # or figure-heavy pages pdfplumber can't represent as text).
     page_images = Column(String, nullable=True)
+    annotations = Column(String, nullable=True)  # NEW: JSON string {"<page_num>": [stroke, ...]}
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -303,6 +304,26 @@ class ProcessSnippetRequest(BaseModel):
     document_name: str
     project_id: str
     lesson_id: Optional[int] = None   # NEW: so saved snippets can be scoped to a lesson
+
+#annotation
+class AnnotationStroke(BaseModel):
+    points: list[list[float]]
+    color: str = "#ff3b30"
+    width: float = 3
+
+# NEW: a draggable text note pinned to a normalized (x,y) position on the page image
+class AnnotationNote(BaseModel):
+    id: str                 # client-generated uuid, so drags/edits target the right note
+    x: float                # 0..1, normalized left position
+    y: float                # 0..1, normalized top position
+    text: str
+    color: str = "#facc15"  # sticky-note background color
+
+class AnnotationsSaveRequest(BaseModel):
+    page: int
+    strokes: list[AnnotationStroke]
+    notes: list[AnnotationNote] = []   # NEW
+
 
 #to save questions in db
 class ProjectQuestionDB(Base):
@@ -1111,6 +1132,43 @@ async def create_lesson_entry(
         created_at=new_entry.created_at
     )
 # === END LESSONS BACKEND: endpoints ===
+
+
+# NEW: fetches this document's saved annotations, keyed by page number.
+# Frontend calls this once when a document becomes active, to repopulate
+# strokes/notes drawn in a previous session.
+@app.get("/api/projects/{project_id}/study/documents/{document_id}/annotations")
+async def get_document_annotations(
+    project_id: str, document_id: int, db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(select(StudyDocumentDB).where(StudyDocumentDB.id == document_id))
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    # returns { "1": {"strokes": [...], "notes": [...]}, "2": {...} } — empty dict if nothing saved yet
+    return json.loads(doc.annotations) if doc.annotations else {}
+
+
+@app.put("/api/projects/{project_id}/study/documents/{document_id}/annotations")
+async def save_document_annotations(
+    project_id: str,
+    document_id: int,
+    payload: AnnotationsSaveRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(StudyDocumentDB).where(StudyDocumentDB.id == document_id))
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    existing = json.loads(doc.annotations) if doc.annotations else {}
+    existing[str(payload.page)] = {
+        "strokes": [s.dict() for s in payload.strokes],
+        "notes": [n.dict() for n in payload.notes],   # NEW
+    }
+    doc.annotations = json.dumps(existing)
+    await db.commit()
+    return {"success": True}
 
 
 # ─── EXPERT DASHBOARD DATABASE MODELS ───────────────────────────────

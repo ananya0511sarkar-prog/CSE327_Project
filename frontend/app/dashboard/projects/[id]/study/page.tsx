@@ -15,6 +15,22 @@ interface Message {
   aiUsed?: 'ChatGPT' | 'Gemini' | 'Claude';
   timestamp: Date;
 }
+// NEW: one freehand pen stroke
+interface Stroke {
+  points: { x: number; y: number }[]; // normalized 0..1 of the image box
+  color: string;
+  width: number;
+}
+
+
+// NEW: a draggable text note pinned to a page
+interface Note {
+  id: string;
+  x: number;      // 0..1 normalized
+  y: number;      // 0..1 normalized
+  text: string;
+  color: string;
+}
 
 interface StudyDocument {
   id: number;
@@ -23,6 +39,7 @@ interface StudyDocument {
   pages: number;
   content: string;
   page_images?: { page: number; image_base64: string }[];
+  annotations?: Record<number, { strokes: Stroke[]; notes: Note[] }>; // CHANGED: shape now includes notes
 }
 
 interface SavedItem {
@@ -58,7 +75,7 @@ interface Lesson {
   entries: LessonEntry[];
 }
 
-type SelectionMode = 'text' | 'crop';
+type SelectionMode = 'text' | 'crop' | 'annotate' | 'note';
 type AIAction = 'summarize' | 'explain' | 'questions';
 
 export default function StudyPage({ params }: StudyWorkspaceProps) {
@@ -101,6 +118,78 @@ export default function StudyPage({ params }: StudyWorkspaceProps) {
   const [selectionMode, setSelectionMode] = useState<SelectionMode>('text');
   const [highlights, setHighlights] = useState<string[]>([]);
   const [activeSnippet, setActiveSnippet] = useState<string>('');
+
+
+  // --- ANNOTATION STATES ---
+const [annotationColor, setAnnotationColor] = useState<string>('#ff3b30');
+
+// NEW: generic "save this page's full annotation state" — used by strokes, note add/move/edit/delete
+const persistAnnotations = async (
+  doc: StudyDocument,
+  page: number,
+  strokes: Stroke[],
+  notes: Note[]
+) => {
+  setDocuments(prev => prev.map(d =>
+    d.id === doc.id ? { ...d, annotations: { ...(d.annotations || {}), [page]: { strokes, notes } } } : d
+  ));
+  if (activeDocument?.id === doc.id) {
+    setActiveDocument(prev => prev ? { ...prev, annotations: { ...(prev.annotations || {}), [page]: { strokes, notes } } } : prev);
+  }
+  try {
+    await fetch(
+      `http://localhost:8000/api/projects/${projectId}/study/documents/${doc.id}/annotations`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ page, strokes, notes }),
+      }
+    );
+  } catch (err) {
+    console.error("Failed to save annotations:", err);
+  }
+};
+
+const handleAddAnnotationStroke = (doc: StudyDocument, page: number, stroke: Stroke) => {
+  const current = doc.annotations?.[page] || { strokes: [], notes: [] };
+  persistAnnotations(doc, page, [...current.strokes, stroke], current.notes);
+};
+
+// NEW: note handlers
+const handleAddNote = (doc: StudyDocument, page: number, note: Note) => {
+  const current = doc.annotations?.[page] || { strokes: [], notes: [] };
+  persistAnnotations(doc, page, current.strokes, [...current.notes, note]);
+};
+const handleChangeNote = (doc: StudyDocument, page: number, updated: Note) => {
+  const current = doc.annotations?.[page] || { strokes: [], notes: [] };
+  persistAnnotations(doc, page, current.strokes, current.notes.map(n => n.id === updated.id ? updated : n));
+};
+const handleDeleteNote = (doc: StudyDocument, page: number, id: string) => {
+  const current = doc.annotations?.[page] || { strokes: [], notes: [] };
+  persistAnnotations(doc, page, current.strokes, current.notes.filter(n => n.id !== id));
+};
+
+// Loader — unchanged except the fetched shape is now {strokes, notes} per page, matches backend
+useEffect(() => {
+  if (!activeDocument) return;
+  const loadAnnotations = async () => {
+    try {
+      const res = await fetch(
+        `http://localhost:8000/api/projects/${projectId}/study/documents/${activeDocument.id}/annotations`
+      );
+      const data = await res.json();
+      setDocuments(prev => prev.map(d => d.id === activeDocument.id ? { ...d, annotations: data } : d));
+      setActiveDocument(prev => prev ? { ...prev, annotations: data } : prev);
+    } catch (err) {
+      console.error("Failed to load annotations:", err);
+    }
+  };
+  loadAnnotations();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [activeDocument?.id]);
+
+
+
 
   // Crop & Viewer Refs
   const viewerRef = useRef<HTMLDivElement>(null);
@@ -709,30 +798,43 @@ const handleSectionImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     });
   };
 
-  const renderContentWithImages = (content: string, pageImages: { page: number; image_base64: string }[] = []) => {
-    const parts = content.split(/\[\[PAGE_IMAGE:(\d+)\]\]/g);
-    return parts.map((part, idx) => {
-      const isPageNumber = idx % 2 === 1;
-      if (isPageNumber) {
-        const pageNum = Number(part);
-        const match = pageImages.find(p => p.page === pageNum);
-        if (!match) return null;
-        return (
-          <div key={`img-${idx}`} className="my-4 border border-slate-800 rounded-lg overflow-hidden">
-            <div className="text-[10px] text-slate-500 px-2 py-1 bg-slate-900 border-b border-slate-800">
-              Page {pageNum}
-            </div>
-            <img
-              src={`data:image/png;base64,${match.image_base64}`}
-              alt={`Page ${pageNum}`}
-              className="w-full h-auto"
-            />
+const renderContentWithImages = (
+  content: string,
+  pageImages: { page: number; image_base64: string }[] = [],
+  doc?: StudyDocument
+) => {
+  const parts = content.split(/\[\[PAGE_IMAGE:(\d+)\]\]/g);
+  return parts.map((part, idx) => {
+    const isPageNumber = idx % 2 === 1;
+    if (isPageNumber) {
+      const pageNum = Number(part);
+      const match = pageImages.find(p => p.page === pageNum);
+      if (!match) return null;
+      const pageAnn = doc?.annotations?.[pageNum] || { strokes: [], notes: [] };
+      const isActiveDoc = doc?.id === activeDocument?.id;
+      return (
+        <div key={`img-${idx}`} className="my-4 border border-slate-800 rounded-lg overflow-hidden">
+          <div className="text-[10px] text-slate-500 px-2 py-1 bg-slate-900 border-b border-slate-800">
+            Page {pageNum}
           </div>
-        );
-      }
-      return <span key={`text-${idx}`}>{renderHighlightedContent(part)}</span>;
-    });
-  };
+          <PageAnnotationLayer
+            imageSrc={`data:image/png;base64,${match.image_base64}`}
+            strokes={pageAnn.strokes}
+            notes={pageAnn.notes}
+            editable={isActiveDoc && (selectionMode === 'annotate' || selectionMode === 'note')}
+            mode={selectionMode === 'annotate' || selectionMode === 'note' ? selectionMode : null}
+            penColor={annotationColor}
+            onAddStroke={(s) => doc && handleAddAnnotationStroke(doc, pageNum, s)}
+            onAddNote={(n) => doc && handleAddNote(doc, pageNum, n)}
+            onChangeNote={(n) => doc && handleChangeNote(doc, pageNum, n)}
+            onDeleteNote={(id) => doc && handleDeleteNote(doc, pageNum, id)}
+          />
+        </div>
+      );
+    }
+    return <span key={`text-${idx}`}>{renderHighlightedContent(part)}</span>;
+  });
+};
 
   const handleRunAiAction = async (action: AIAction) => {
     if (!activeSnippet.trim() || isProcessingAction || !activeDocument) return;
@@ -987,6 +1089,37 @@ const handleDownloadLessonPdf = async () => { // NEW
                 >
                   Crop Area
                 </button>
+                
+               <button
+  type="button"
+  onClick={() => setSelectionMode('annotate')}
+  className={`px-2 py-1 rounded font-medium transition-colors ${
+    selectionMode === 'annotate' ? 'bg-rose-600/30 text-rose-400 border border-rose-500/40' : 'text-slate-400 hover:text-slate-200'
+  }`}
+>
+  Annotate
+</button>
+{selectionMode === 'annotate' && (
+  <input
+    type="color"
+    value={annotationColor}
+    onChange={(e) => setAnnotationColor(e.target.value)}
+    className="w-6 h-6 rounded border border-slate-800 bg-transparent ml-1"
+    title="Pen color"
+  />
+)}
+
+
+<button
+  type="button"
+  onClick={() => setSelectionMode('note')}
+  className={`px-2 py-1 rounded font-medium transition-colors ${
+    selectionMode === 'note' ? 'bg-amber-600/30 text-amber-400 border border-amber-500/40' : 'text-slate-400 hover:text-slate-200'
+  }`}
+>
+  Add Note
+</button>
+
               </div>
 
               <button
@@ -1030,7 +1163,7 @@ const handleDownloadLessonPdf = async () => { // NEW
 
                 <div className="space-y-4 text-xs sm:text-sm text-slate-300 leading-relaxed font-sans">
                   <div className="whitespace-pre-wrap">
-                    {renderContentWithImages(activeDocument.content, activeDocument.page_images)}
+                    {renderContentWithImages(activeDocument.content, activeDocument.page_images, activeDocument)}
                   </div>
                 </div>
               </>
@@ -1347,20 +1480,24 @@ const handleDownloadLessonPdf = async () => { // NEW
                       <span className="text-[10px] uppercase font-bold tracking-widest text-blue-400 block mb-3">
                         SOURCE DOCUMENT{lessonDocuments.length > 1 ? 'S' : ''}
                       </span>
-                      {lessonDocuments.map(doc => (
-                        <div key={doc.id} className="mb-4">
-                          <div className="text-xs font-bold text-amber-400 mb-2">📎 {doc.name}</div>
-                          {(doc.page_images || []).map(img => (
-                            <div key={img.page} className="mb-3 border border-slate-800 rounded-lg overflow-hidden">
-                              <img
-                                src={`data:image/png;base64,${img.image_base64}`}
-                                alt={`${doc.name} page ${img.page}`}
-                                className="w-full h-auto"
-                              />
-                            </div>
-                          ))}
-                        </div>
-                      ))}
+{lessonDocuments.map(doc => (
+  <div key={doc.id} className="mb-4">
+    <div className="text-xs font-bold text-amber-400 mb-2">📎 {doc.name}</div>
+    {(doc.page_images || []).map(img => {
+      const pageAnn = doc.annotations?.[img.page] || { strokes: [], notes: [] };
+      return (
+        <div key={img.page} className="mb-3 border border-slate-800 rounded-lg overflow-hidden">
+          <PageAnnotationLayer
+            imageSrc={`data:image/png;base64,${img.image_base64}`}
+            strokes={pageAnn.strokes}
+            notes={pageAnn.notes}
+            editable={false}
+          />
+        </div>
+      );
+    })}
+  </div>
+))}
                     </div>
                   )}
                   {/* ↑↑↑ END NEW BLOCK ↑↑↑ */}
@@ -1702,5 +1839,233 @@ const handleDownloadLessonPdf = async () => { // NEW
     </div>
   );
 }
+
+// ============================================================
+// NEW: one draggable sticky note, positioned absolutely inside
+// its page's container using normalized x/y (0..1).
+// editable=false (export view) just renders it in place, no drag handles.
+// ============================================================
+function DraggableNote({
+  note,
+  editable,
+  onChange,
+  onDelete,
+}: {
+  note: Note;
+  editable: boolean;
+  onChange?: (updated: Note) => void;
+  onDelete?: (id: string) => void;
+}) {
+  const [isDragging, setIsDragging] = useState(false);
+  const [isEditingText, setIsEditingText] = useState(false);
+  const [draftText, setDraftText] = useState(note.text);
+  const noteRef = useRef<HTMLDivElement>(null);
+
+  const handlePointerDown = (e: React.PointerEvent) => {
+    if (!editable || isEditingText) return;
+    e.stopPropagation(); // don't let this bubble into crop/highlight handlers
+    setIsDragging(true);
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  };
+
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (!isDragging || !onChange) return;
+    const container = noteRef.current?.parentElement;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    const x = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    const y = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+    onChange({ ...note, x, y });
+  };
+
+  const handlePointerUp = () => setIsDragging(false);
+
+  return (
+    <div
+      ref={noteRef}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onClick={(e) => e.stopPropagation()}   // NEW: also block the native click from bubbling to the container
+      style={{
+        position: 'absolute',
+        left: `${note.x * 100}%`,
+        top: `${note.y * 100}%`,
+        backgroundColor: note.color,
+        cursor: editable ? (isDragging ? 'grabbing' : 'grab') : 'default',
+        maxWidth: '180px',
+        zIndex: 20,
+      }}
+      className="rounded-md shadow-lg px-2 py-1.5 text-[11px] text-slate-900 font-medium"
+    >
+      {editable && isEditingText ? (
+        <textarea
+          autoFocus
+          value={draftText}
+          onChange={(e) => setDraftText(e.target.value)}
+          onBlur={() => {
+            setIsEditingText(false);
+            onChange?.({ ...note, text: draftText });
+          }}
+          className="w-full bg-transparent outline-none resize-none text-[11px] text-slate-900"
+          rows={3}
+        />
+      ) : (
+        <div onDoubleClick={() => editable && setIsEditingText(true)} className="whitespace-pre-wrap break-words">
+          {note.text || <span className="italic opacity-60">Double-click to write...</span>}
+        </div>
+      )}
+
+      {editable && !isEditingText && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onDelete?.(note.id); }}
+          className="absolute -top-2 -right-2 bg-slate-900 text-white text-[10px] w-4 h-4 rounded-full flex items-center justify-center leading-none"
+        >
+          ✕
+        </button>
+      )}
+    </div>
+  );
+}
+
+function PageAnnotationLayer({
+  imageSrc,
+  strokes,
+  notes,                    // NEW
+  editable,
+  mode,                     // NEW: 'annotate' (pen) | 'note' (placing notes) | null (view only)
+  onAddStroke,
+  onAddNote,                 // NEW
+  onChangeNote,               // NEW
+  onDeleteNote,                // NEW
+  penColor,
+}: {
+  imageSrc: string;
+  strokes: Stroke[];
+  notes: Note[];                                 // NEW
+  editable: boolean;
+  mode?: 'annotate' | 'note' | null;             // NEW
+  onAddStroke?: (stroke: Stroke) => void;
+  onAddNote?: (note: Note) => void;               // NEW
+  onChangeNote?: (note: Note) => void;             // NEW
+  onDeleteNote?: (id: string) => void;              // NEW
+  penColor?: string;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [livePoints, setLivePoints] = useState<{ x: number; y: number }[]>([]);
+
+  const redraw = () => {
+    const canvas = canvasRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
+
+    const { width, height } = container.getBoundingClientRect();
+    canvas.width = width;
+    canvas.height = height;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, width, height);
+
+    const drawStroke = (s: Stroke) => {
+      if (s.points.length < 2) return;
+      ctx.beginPath();
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = s.width;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      s.points.forEach((p, i) => {
+        const px = p.x * width;
+        const py = p.y * height;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      });
+      ctx.stroke();
+    };
+
+    strokes.forEach(drawStroke);
+    if (livePoints.length > 1) {
+      drawStroke({ points: livePoints, color: penColor || '#ff3b30', width: 3 });
+    }
+  };
+
+  useEffect(() => {
+    redraw();
+    const ro = new ResizeObserver(redraw);
+    if (containerRef.current) ro.observe(containerRef.current);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strokes, livePoints]);
+
+  const getNormalizedPoint = (clientX: number, clientY: number) => {
+    const rect = canvasRef.current!.getBoundingClientRect();
+    return { x: (clientX - rect.left) / rect.width, y: (clientY - rect.top) / rect.height };
+  };
+
+  // Pen drawing (only active in 'annotate' mode)
+  const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!editable || mode !== 'annotate') return;
+    setIsDrawing(true);
+    setLivePoints([getNormalizedPoint(e.clientX, e.clientY)]);
+  };
+  const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!editable || mode !== 'annotate' || !isDrawing) return;
+    setLivePoints(prev => [...prev, getNormalizedPoint(e.clientX, e.clientY)]);
+  };
+  const handlePointerUp = () => {
+    if (!editable || mode !== 'annotate' || !isDrawing) return;
+    setIsDrawing(false);
+    if (livePoints.length > 1 && onAddStroke) {
+      onAddStroke({ points: livePoints, color: penColor || '#ff3b30', width: 3 });
+    }
+    setLivePoints([]);
+  };
+
+  // NEW: click-to-place a note (only active in 'note' mode)
+  const handleContainerClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!editable || mode !== 'note' || !onAddNote) return;
+    const rect = containerRef.current!.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    onAddNote({
+      id: crypto.randomUUID(),
+      x, y,
+      text: '',
+      color: '#facc15',
+    });
+  };
+
+  return (
+    <div ref={containerRef} onClick={handleContainerClick} className="relative w-full">
+      <img src={imageSrc} className="w-full h-auto block" alt="Page" />
+      <canvas
+        ref={canvasRef}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerLeave={handlePointerUp}
+        className="absolute inset-0 w-full h-full"
+        style={{
+          touchAction: editable && mode === 'annotate' ? 'none' : 'auto',
+          cursor: editable && mode === 'annotate' ? 'crosshair' : editable && mode === 'note' ? 'copy' : 'default',
+          pointerEvents: editable && mode === 'annotate' ? 'auto' : 'none', // NEW: let clicks fall through to container for note-placing
+        }}
+      />
+      {/* NEW: render all notes for this page */}
+      {notes.map(n => (
+        <DraggableNote
+          key={n.id}
+          note={n}
+          editable={editable}
+          onChange={onChangeNote}
+          onDelete={onDeleteNote}
+        />
+      ))}
+    </div>
+  );
+}
     
-     
+  
